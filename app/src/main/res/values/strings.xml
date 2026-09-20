@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Local Air Quality</string>
+    <string name="notification_channel_name">Local air quality</string>
+    <string name="notification_channel_description">Current local air quality status</string>
+    <string name="update">Update</string>
+    <string name="widget_description">Local air quality</string>
+    <string name="not_available">—</string>
+    <string name="us_aqi_plus">US AQI+</string>
+    <string name="waiting_for_data">Waiting for data</string>
+    <string name="nearest_official_station">Nearest official station</string>
+    <string name="european_aqi_empty">European AQI —</string>
+    <string name="empty_time">—:—</string>
+    <string name="refresh_symbol">↻</string>
+</resources>
+
+
