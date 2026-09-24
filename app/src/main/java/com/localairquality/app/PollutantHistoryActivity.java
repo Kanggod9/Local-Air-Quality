@@ -22,6 +22,7 @@ public final class PollutantHistoryActivity extends Activity {
     };
     private HistorySeries.Metric metric;
     private LinearLayout content;
+    private LinearLayout calculationInputs;
     private static final int INK = 0xFF1F2834, MUTED = 0xFF5B6777, GREEN = 0xFF177A68;
 
     @Override protected void onCreate(Bundle state) {
@@ -59,9 +60,20 @@ public final class PollutantHistoryActivity extends Activity {
             addText(content, history.countryName + "\nCurrent station: " + history.stationName, 16, INK, true);
         }
         List<HistorySeries.Point> available = HistorySeries.points(history, metric);
+        calculationInputs = null;
         if (available.isEmpty()) {
             addText(content, "No recorded readings yet", 20, INK, true);
-            addText(content, "Readings will appear after a successful air quality update with this pollutant available.", 16, MUTED, false);
+            addText(content, metric == HistorySeries.Metric.US_NOWCAST
+                    ? "Waiting for enough hourly data."
+                    : "Readings will appear after a successful air quality update with this pollutant available.", 16, MUTED, false);
+            if (metric == HistorySeries.Metric.US_NOWCAST) {
+                var latest = history.latestNowcast(history.activeStationId);
+                if (latest != null) {
+                    LinearLayout inputs = new LinearLayout(this); inputs.setOrientation(LinearLayout.VERTICAL);
+                    content.addView(inputs);
+                    showInputs(inputs, new HistorySeries.Point(latest.measuredAt(),latest.stationName(),Double.NaN,0,"—",Double.NaN,latest.inputs()));
+                }
+            }
             return;
         }
         long start = available.get(0).measuredAt();
@@ -78,13 +90,55 @@ public final class PollutantHistoryActivity extends Activity {
         addText(card, "Tap a point to view its reading", 14, MUTED, false);
         card.addView(new Chart(available, start, now), new LinearLayout.LayoutParams(-1, dp(220)));
         String standard = metric == HistorySeries.Metric.CO ? "US AQI"
-                : metric == HistorySeries.Metric.US_AQI ? "US AQI+" : "European AQI";
+                : metric.usesUsLevels() ? metric.label : "European AQI";
         addText(card, "Pollution level · " + standard, 14, MUTED, true);
         for (int band = 1; band <= 6; band += 2) {
             LinearLayout row = new LinearLayout(this);
             card.addView(row, new LinearLayout.LayoutParams(-1, -2));
             addLevel(row, band);
             addLevel(row, band + 1);
+        }
+        if (metric == HistorySeries.Metric.US_NOWCAST || metric == HistorySeries.Metric.EUROPEAN_AQI) {
+            calculationInputs = new LinearLayout(this);
+            calculationInputs.setOrientation(LinearLayout.VERTICAL);
+            content.addView(calculationInputs, new LinearLayout.LayoutParams(-1, -2));
+            showInputs(calculationInputs, latest);
+        }
+    }
+    private void showInputs(LinearLayout parent, HistorySeries.Point point) {
+        parent.removeAllViews();
+        addText(parent, "Calculation inputs", 21, INK, true);
+        addText(parent, date(point.measuredAt()) + " · " + point.stationName(), 14, MUTED, false);
+        LinearLayout row = null;
+        int column = 0;
+        for (int p = 0; p < point.inputs().size(); p++) {
+            if (metric == HistorySeries.Metric.EUROPEAN_AQI && p == 4) continue;
+            if (column++ % 2 == 0) {
+                row = new LinearLayout(this);
+                row.setBaselineAligned(false);
+                parent.addView(row, new LinearLayout.LayoutParams(-1, -2));
+            }
+            var input = point.inputs().get(p);
+            LinearLayout tile = new LinearLayout(this);
+            tile.setOrientation(LinearLayout.VERTICAL);
+            tile.setPadding(dp(12), dp(8), dp(10), dp(8));
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(0xFFF0F3F5); background.setCornerRadius(dp(16)); tile.setBackground(background);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+            params.setMargins(dp(3), dp(4), dp(3), dp(4)); row.addView(tile, params);
+            addText(tile, PollutantHistory.LABELS[p], 18, INK, false);
+            if (!input.hourlyNotSupplied()) addText(tile, input.method(), 12, MUTED, false);
+            boolean valid = metric == HistorySeries.Metric.US_NOWCAST ? input.aqi() >= 0 : input.aqi() > 0;
+            int color = valid ? (metric == HistorySeries.Metric.US_NOWCAST ? AqiCalculator.usColor(input.aqi())
+                    : AqiCalculator.euColor(input.aqi())) : AqiCalculator.euColor(0);
+            TextView value = new TextView(this);
+            android.text.SpannableString label = new android.text.SpannableString("● "
+                    + AirQualityReading.formatConcentration(PollutantHistory.LABELS[p], valid ? input.concentration() : Double.NaN));
+            label.setSpan(new android.text.style.ForegroundColorSpan(color), 0, 1, 0);
+            value.setText(label); value.setTextSize(15); value.setTextColor(INK); value.setTypeface(null, Typeface.BOLD);
+            tile.addView(value);
+            if (!valid) addText(tile, input.unavailableReason(), 12, MUTED, false);
+            else if (metric == HistorySeries.Metric.US_NOWCAST) addText(tile, input.hours() + " valid hour(s)", 12, MUTED, false);
         }
     }
     private int band(double concentration) {
@@ -99,7 +153,7 @@ public final class PollutantHistoryActivity extends Activity {
         parent.addView(label, parent.getOrientation() == LinearLayout.HORIZONTAL
                 ? new LinearLayout.LayoutParams(0, -2, 1) : new LinearLayout.LayoutParams(-1, -2));
     }
-    private String unit() { return metric.isIndex() ? (metric == HistorySeries.Metric.US_AQI ? "AQI" : "of 6") : metric == HistorySeries.Metric.CO ? "mg/m³" : "µg/m³"; }
+    private String unit() { return metric.isIndex() ? (metric.usesUsLevels() ? "AQI" : "of 6") : metric == HistorySeries.Metric.CO ? "mg/m³" : "µg/m³"; }
     private double display(double value) { return metric == HistorySeries.Metric.CO ? value / 1000 : value; }
     private String value(double value) { return String.format(Locale.getDefault(), metric.isIndex() ? "%.0f" : "%.1f", display(value)); }
     private String date(long time) { return DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(new Date(time)); }
@@ -121,13 +175,25 @@ public final class PollutantHistoryActivity extends Activity {
         addLevel(details, band(sample.value()));
         addText(details, sample.stationName(), 16, MUTED, false);
         if (metric.isIndex()) {
-            int total = metric == HistorySeries.Metric.US_AQI ? 6 : 5;
+            int total = metric.usesUsLevels() ? 6 : 5;
             addText(details, (sample.availablePollutants() < total ? "Partial data · " : "")
                     + sample.availablePollutants() + " of " + total + " pollutants reported at this time", 14, MUTED, false);
+            addText(details, "Main pollutant: " + sample.mainPollutant() + "\n"
+                    + AirQualityReading.formatConcentration(sample.mainPollutant(), sample.mainConcentration()),
+                    16, INK, true);
         }
+        if (calculationInputs != null && !sample.inputs().isEmpty()) showInputs(calculationInputs, sample);
+        if (metric == HistorySeries.Metric.US_NOWCAST || metric == HistorySeries.Metric.EUROPEAN_AQI) {
+            LinearLayout tiles = new LinearLayout(this);
+            tiles.setOrientation(LinearLayout.VERTICAL);
+            details.addView(tiles);
+            showInputs(tiles, sample);
+        }
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(details);
         new AlertDialog.Builder(this)
                 .setTitle(metric.label)
-                .setView(details)
+                .setView(scroll)
                 .setPositiveButton(android.R.string.ok, null)
                 .show();
     }
@@ -258,6 +324,5 @@ public final class PollutantHistoryActivity extends Activity {
         }
     }
 }
-
 
 

@@ -49,6 +49,7 @@ public final class HistoryStore {
         return history.completeRecovery(request) && save(context, history);
     }
     private static boolean save(Context context, PollutantHistory history) {
+        history.updateNowcasts(System.currentTimeMillis());
         AtomicFile file = file(context);
         FileOutputStream out = null;
         try {
@@ -63,7 +64,6 @@ public final class HistoryStore {
         }
     }
 }
-
 
 
 

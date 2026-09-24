@@ -7,7 +7,7 @@ import java.time.*;
 import java.util.*;
 import java.util.function.Consumer;
 
-/** Recovers only actual provider reports during the current known station session. */
+/** Recovers provider reports for the known station; only ozone calibration can extend to 14 days. */
 public final class HistoryRecoveryRepository {
     private HistoryRecoveryRepository() {}
     @FunctionalInterface interface JsonFetcher {
@@ -63,9 +63,9 @@ public final class HistoryRecoveryRepository {
                 if (sensor <= 0) continue;
                 try {
                     // A failed sensor must not prevent recovery of other pollutants.
-                    for (int page = 1; page <= 3; page++) {
+                    for (int page = 1; page <= (p == 2 ? 4 : 3); page++) {
                         String url = "https://api.openaq.org/v3/sensors/" + sensor + "/hours?limit=100&page=" + page
-                                + "&datetime_from=" + encode(Instant.ofEpochMilli(request.from()).toString())
+                                + "&datetime_from=" + encode(Instant.ofEpochMilli(p == 2 ? request.ozoneFrom() : request.from()).toString())
                                 + "&datetime_to=" + encode(Instant.ofEpochMilli(request.to()).toString());
                         JSONArray results = fetcher.get(url, headers).getJSONArray("results");
                         publish.accept(parseOpenAq(results, p, reading));
@@ -125,4 +125,3 @@ public final class HistoryRecoveryRepository {
         return result;
     }
 }
-

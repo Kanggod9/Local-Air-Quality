@@ -43,6 +43,8 @@ public final class AirQualityReading {
     public String mainPollutant = "—";
     public int euBand;
     public String euLevel = "No data";
+    // Derived from retained station history; deliberately not duplicated in the reading JSON cache.
+    public NowCast.Snapshot nowcast;
 
     public int availablePollutants() {
         int count = 0;
@@ -75,6 +77,11 @@ public final class AirQualityReading {
             case "SO2" -> so2;
             default -> MISSING;
         };
+        return formatConcentration(pollutant, value);
+    }
+
+    /** Formats a stored concentration in µg/m³, using mg/m³ for CO. */
+    public static String formatConcentration(String pollutant, double value) {
         if (!isPresent(value)) return "—";
         if ("CO".equals(pollutant)) {
             return String.format(Locale.getDefault(), "%.1f mg/m³", value / 1000.0);
@@ -173,7 +180,6 @@ public final class AirQualityReading {
         return json.has(key) ? json.optDouble(key, MISSING) : MISSING;
     }
 }
-
 
 
 

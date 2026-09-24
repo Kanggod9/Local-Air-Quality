@@ -16,6 +16,7 @@ public final class ReadingStore {
 
     public static void saveReading(Context context, AirQualityReading reading) {
         HistoryStore.record(context, reading);
+        reading.nowcast = HistoryStore.load(context).latestNowcast(reading.stationId);
         try {
             prefs(context).edit().putString(KEY_READING, reading.toJson().toString()).apply();
         } catch (Exception ignored) {
@@ -27,7 +28,14 @@ public final class ReadingStore {
         String encoded = prefs(context).getString(KEY_READING, null);
         if (encoded == null) return null;
         try {
-            return AirQualityReading.fromJson(encoded);
+            AirQualityReading reading = AirQualityReading.fromJson(encoded);
+            if (reading.measuredAtMillis < System.currentTimeMillis() - PollutantHistory.WINDOW) {
+                prefs(context).edit().remove(KEY_READING).apply();
+                HistoryStore.load(context);
+                return null;
+            }
+            reading.nowcast = HistoryStore.load(context).latestNowcast(reading.stationId);
+            return reading;
         } catch (Exception ignored) {
             return null;
         }
@@ -70,6 +78,5 @@ public final class ReadingStore {
 
     public record SavedLocation(double latitude, double longitude, String name) {}
 }
-
 
 

@@ -40,6 +40,11 @@ public final class AqiCalculator {
     }
 
     public static EuResult europeanAqi(AirQualityReading r) {
+        if (r.stationId.startsWith("nea:")) {
+            int pmBand = europeanPollutantBand("PM2.5", r.pm25);
+            return pmBand == 0 ? new EuResult(0, "No data", "—")
+                    : new EuResult(pmBand, EU_LEVELS[pmBand - 1], "PM2.5");
+        }
         int band = 0;
         String pollutant = "—";
         int candidate = europeanPollutantBand("PM2.5", r.pm25);
@@ -58,24 +63,9 @@ public final class AqiCalculator {
     }
 
     public static double pmNowCast(List<Double> newestFirst) {
-        List<Double> values = new ArrayList<>();
-        for (Double value : newestFirst) {
-            if (value != null && AirQualityReading.isPresent(value)) values.add(value);
-            if (values.size() == 12) break;
-        }
-        if (values.size() < 2) return values.isEmpty() ? Double.NaN : values.get(0);
-        double minimum = Collections.min(values);
-        double maximum = Collections.max(values);
-        if (maximum <= 0) return 0;
-        double weight = Math.max(0.5, 1.0 - ((maximum - minimum) / maximum));
-        double numerator = 0;
-        double denominator = 0;
-        for (int i = 0; i < values.size(); i++) {
-            double factor = Math.pow(weight, i);
-            numerator += values.get(i) * factor;
-            denominator += factor;
-        }
-        return numerator / denominator;
+        double[] hours = new double[Math.min(12, newestFirst.size())];
+        for (int i = 0; i < hours.length; i++) hours[i] = newestFirst.get(i) == null ? Double.NaN : newestFirst.get(i);
+        return NowCast.particle(hours);
     }
 
     public static double rollingAverage(List<Double> newestFirst, int hours) {
@@ -218,4 +208,3 @@ public final class AqiCalculator {
     public record UsResult(int aqi, String level, String pollutant) {}
     public record EuResult(int band, String level, String pollutant) {}
 }
-

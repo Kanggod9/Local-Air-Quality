@@ -45,7 +45,7 @@ public final class AirQualityView extends View {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF updateBounds = new RectF();
     private final RectF actionBounds = new RectF();
-    private final RectF usBounds = new RectF(), euBounds = new RectF();
+    private final RectF usBounds = new RectF(), euBounds = new RectF(), nowcastBounds = new RectF();
     private final RectF[] pollutantBounds = {new RectF(), new RectF(), new RectF(), new RectF(), new RectF(), new RectF()};
     private final float density;
     private final float scaledDensity;
@@ -95,7 +95,7 @@ public final class AirQualityView extends View {
         adviceLayout = null;
         adviceCheckedAt = 0;
         setContentDescription(reading.locationName + ", US AQI " + reading.usAqi + ", "
-                + reading.usLevel + ", European AQI " + reading.euBand + ", " + reading.euLevel);
+                + reading.usLevel + ", European AQI " + reading.euBand + ", " + reading.euLevel + nowcastDescription());
         invalidate();
     }
 
@@ -136,7 +136,7 @@ public final class AirQualityView extends View {
         super.onDraw(canvas);
         for (RectF bounds : pollutantBounds) bounds.setEmpty();
         actionBounds.setEmpty();
-        usBounds.setEmpty(); euBounds.setEmpty();
+        usBounds.setEmpty(); euBounds.setEmpty(); nowcastBounds.setEmpty();
         updateBounds.setEmpty();
         canvas.drawColor(BACKGROUND);
         float translatedPull = scrollOffset <= 0 ? pullDistance * 0.45f : 0;
@@ -161,9 +161,18 @@ public final class AirQualityView extends View {
 
         drawUsCard(canvas, pad, y, width, dp(218));
         y += dp(234);
-
         drawEuCard(canvas, pad, y, width, dp(132));
         y += dp(148);
+
+        var nowcast = reading.nowcast;
+        String detail = nowcast == null ? "Not enough hourly data" : nowcast.status() + "\n"
+                + nowcast.pollutant() + " · " + AirQualityReading.formatConcentration(nowcast.pollutant(), nowcast.concentration())
+                + "\n" + formatDateTime(nowcast.measuredAt());
+        y = drawIndexCard(canvas, pad, y, width, "US AQI · NowCast", nowcast == null ? "—" : nowcast.score(),
+                nowcast == null ? "Not enough data" : nowcast.level(),
+                nowcast == null || nowcast.aqi() < 0 ? AqiCalculator.euColor(0) : AqiCalculator.usColor(nowcast.aqi()),
+                detail, nowcastBounds);
+        y += dp(16);
 
         drawStationCard(canvas, pad, y, width, dp(104));
         y += dp(122);
@@ -176,6 +185,31 @@ public final class AirQualityView extends View {
                 13, MUTED, Paint.Align.LEFT, Typeface.NORMAL);
         y += dp(38);
         contentHeight = y;
+    }
+
+    private float drawIndexCard(Canvas canvas, float x, float y, float width, String title, String score,
+                                String level, int color, String detail, RectF bounds) {
+        TextPaint labelPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        labelPaint.setTypeface(BOLD_FONT); labelPaint.setColor(INK); labelPaint.setTextSize(17 * scaledDensity);
+        StaticLayout levelLayout = StaticLayout.Builder.obtain(level, 0, level.length(), labelPaint,
+                Math.max(1, (int)(width - dp(115)))).setIncludePad(false).build();
+        float body = Math.max(dp(38), levelLayout.getHeight());
+        TextPaint detailPaint = new TextPaint(labelPaint); detailPaint.setTypeface(NORMAL_FONT); detailPaint.setTextSize(12 * scaledDensity);
+        StaticLayout detailLayout = StaticLayout.Builder.obtain(detail, 0, detail.length(), detailPaint,
+                Math.max(1, (int)(width - dp(32)))).setIncludePad(false).setLineSpacing(dp(3), 1).build();
+        float height = dp(58) + body + (detail.isEmpty() ? 0 : detailLayout.getHeight() + dp(10));
+        bounds.set(x,y,x+width,y+height);
+        rounded(canvas,x,y,x+width,y+height,dp(22),color);
+        // Use a light neutral label panel for legible text even on dark hazardous colours.
+        rounded(canvas,x+dp(8),y+dp(8),x+width-dp(8),y+height-dp(8),dp(16),0xEFFFFFFF);
+        text(canvas,title,x+dp(16),y+dp(30),14,INK,Paint.Align.LEFT,Typeface.BOLD);
+        text(canvas,"›",x+width-dp(17),y+dp(30),18,INK,Paint.Align.RIGHT,Typeface.NORMAL);
+        text(canvas,score,x+dp(16),y+dp(67),29,INK,Paint.Align.LEFT,Typeface.BOLD);
+        canvas.save(); canvas.translate(x+dp(99),y+dp(44)); levelLayout.draw(canvas); canvas.restore();
+        if (!detail.isEmpty()) {
+            canvas.save(); canvas.translate(x+dp(16),y+dp(48)+body); detailLayout.draw(canvas); canvas.restore();
+        }
+        return y+height;
     }
 
     private void drawLocationHeader(Canvas canvas, float x, float y, float width) {
@@ -261,6 +295,10 @@ public final class AirQualityView extends View {
         text(canvas, reading.euLevel, x + dp(112), y + dp(55), 26,
                 foreground, Paint.Align.LEFT, Typeface.BOLD);
         text(canvas, "European AQI", x + dp(112), y + dp(84), 15,
+                foreground, Paint.Align.LEFT, Typeface.NORMAL);
+        int count = reading.stationId.startsWith("nea:") ? (AirQualityReading.isPresent(reading.pm25) ? 1 : 0)
+                : reading.availablePollutants() - (AirQualityReading.isPresent(reading.co) ? 1 : 0);
+        if (count < 5) text(canvas, "Partial · " + count + "/5 pollutants", x + dp(112), y + dp(109), 12,
                 foreground, Paint.Align.LEFT, Typeface.NORMAL);
     }
 
@@ -354,7 +392,7 @@ public final class AirQualityView extends View {
             adviceCheckedAt = now;
             setContentDescription(reading.locationName + ", US AQI " + reading.usAqi + ", "
                     + reading.usLevel + ", European AQI " + reading.euBand + ", " + reading.euLevel
-                    + ". " + body);
+                    + nowcastDescription() + ". " + body);
         }
         float height = adviceLayout.getHeight() + dp(40);
         roundedShadow(canvas, x, y, x + width, y + height, dp(22), Color.WHITE);
@@ -380,6 +418,10 @@ public final class AirQualityView extends View {
             body.setSpan(new StyleSpan(Typeface.BOLD), subStart, body.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             body.append("\n");
         }
+    }
+    private String nowcastDescription() {
+        return reading.nowcast == null ? ", US NowCast not enough data" : ", US NowCast " + reading.nowcast.score()
+                + ", " + reading.nowcast.level() + ", " + reading.nowcast.status();
     }
 
     private void drawEmptyHeader(Canvas canvas) {
@@ -455,7 +497,8 @@ public final class AirQualityView extends View {
                 } else if (!moved && actionBounds.contains(x, y) && listener != null && action != null) {
                     listener.onActionRequested(action);
                 } else if (!moved && stateMessage == null && reading != null && listener != null) {
-                    if (usBounds.contains(x, y + scrollOffset)) listener.onPollutantSelected("US AQI+");
+                    if (nowcastBounds.contains(x, y + scrollOffset)) listener.onPollutantSelected("US NowCast");
+                    else if (usBounds.contains(x, y + scrollOffset)) listener.onPollutantSelected("US AQI+");
                     else if (euBounds.contains(x, y + scrollOffset)) listener.onPollutantSelected("European AQI");
                     for (int i = 0; i < pollutantBounds.length; i++) {
                         if (pollutantBounds[i].contains(x, y + scrollOffset)) {
@@ -482,14 +525,14 @@ public final class AirQualityView extends View {
     @Override public void onInitializeAccessibilityNodeInfo(android.view.accessibility.AccessibilityNodeInfo info) {
         super.onInitializeAccessibilityNodeInfo(info);
         if (reading == null) return;
-        String[] labels = {"US AQI+", "European AQI", "PM2.5", "PM10", "O3", "NO2", "CO", "SO2"};
+        String[] labels = {"US AQI+", "European AQI", "PM2.5", "PM10", "O3", "NO2", "CO", "SO2", "US NowCast"};
         for (int i = 0; i < labels.length; i++) {
             info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(
                     0x01000000 + i, "Open " + labels[i] + " history"));
         }
     }
     @Override public boolean performAccessibilityAction(int action, android.os.Bundle arguments) {
-        String[] labels = {"US AQI+", "European AQI", "PM2.5", "PM10", "O3", "NO2", "CO", "SO2"};
+        String[] labels = {"US AQI+", "European AQI", "PM2.5", "PM10", "O3", "NO2", "CO", "SO2", "US NowCast"};
         int index = action - 0x01000000;
         if (reading != null && listener != null && index >= 0 && index < labels.length) {
             listener.onPollutantSelected(labels[index]);
@@ -592,7 +635,6 @@ public final class AirQualityView extends View {
         return value * density;
     }
 }
-
 
 
 

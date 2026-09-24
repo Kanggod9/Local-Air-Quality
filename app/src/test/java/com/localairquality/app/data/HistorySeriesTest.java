@@ -4,6 +4,91 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 public class HistorySeriesTest {
+    @Test public void neaEuropeanInputsExplainUnsupportedMeasurements() {
+        PollutantHistory history = new PollutantHistory();
+        history.samples.add(new PollutantHistory.Sample(100,"nea:west","West",new double[]{41,45,9,45,1000,4}));
+        var point = HistorySeries.points(history, HistorySeries.Metric.EUROPEAN_AQI).get(0);
+        assertFalse(point.inputs().get(0).hourlyNotSupplied());
+        for (int p : new int[]{1,2,3,5}) {
+            assertTrue(point.inputs().get(p).hourlyNotSupplied());
+            assertEquals("Required hourly measurement not supplied", point.inputs().get(p).unavailableReason());
+        }
+    }
+
+    @Test public void missingHistoryAndLegacyProviderLimitationHaveDifferentMessages() {
+        var legacy = new NowCast.Input(Double.NaN,-1,0,"Hourly data unavailable");
+        assertEquals("Required hourly measurement not supplied",legacy.unavailableReason());
+        var waiting = new NowCast.Input(Double.NaN,-1,1,"12h NowCast");
+        assertFalse(waiting.hourlyNotSupplied());
+        assertEquals("Not enough hourly data",waiting.unavailableReason());
+    }
+    @Test public void eachIndexUsesItsOwnMainPollutantFromTheSelectedReport() {
+        PollutantHistory history = new PollutantHistory();
+        // PM2.5 drives US AQI; NO2 is in a worse European category.
+        history.samples.add(new PollutantHistory.Sample(100,"a","A",new double[]{70,80,45,120,1000,9}));
+        var us = HistorySeries.points(history, HistorySeries.Metric.US_AQI).get(0);
+        var eu = HistorySeries.points(history, HistorySeries.Metric.EUROPEAN_AQI).get(0);
+        assertEquals("PM2.5", us.mainPollutant());
+        assertEquals(70, us.mainConcentration(), 0);
+        assertEquals("NO2", eu.mainPollutant());
+        assertEquals(120, eu.mainConcentration(), 0);
+    }
+
+    @Test public void mainPollutantDoesNotLeakBetweenReportsOrStations() {
+        PollutantHistory history = new PollutantHistory();
+        history.samples.add(new PollutantHistory.Sample(100,"a","A",new double[]{70,80,45,23,1000,9}));
+        history.samples.add(new PollutantHistory.Sample(101,"b","B",new double[]{Double.NaN,Double.NaN,200,Double.NaN,Double.NaN,Double.NaN}));
+        for (var metric : new HistorySeries.Metric[]{HistorySeries.Metric.US_AQI, HistorySeries.Metric.EUROPEAN_AQI}) {
+            var points = HistorySeries.points(history, metric);
+            assertEquals("PM2.5", points.get(0).mainPollutant());
+            assertEquals(70, points.get(0).mainConcentration(), 0);
+            assertEquals("O3", points.get(1).mainPollutant());
+            assertEquals(200, points.get(1).mainConcentration(), 0);
+            assertEquals(1, points.get(1).availablePollutants());
+        }
+    }
+
+    @Test public void coIsStoredInMicrogramsAndExcludedFromEuropeanMainPollutant() {
+        PollutantHistory history = new PollutantHistory();
+        history.samples.add(new PollutantHistory.Sample(100,"a","A",new double[]{1,Double.NaN,Double.NaN,Double.NaN,10000,Double.NaN}));
+        var us = HistorySeries.points(history, HistorySeries.Metric.US_AQI).get(0);
+        var eu = HistorySeries.points(history, HistorySeries.Metric.EUROPEAN_AQI).get(0);
+        assertEquals("CO", us.mainPollutant());
+        assertEquals(10000, us.mainConcentration(), 0);
+        assertEquals("PM2.5", eu.mainPollutant());
+        assertEquals(1, eu.mainConcentration(), 0);
+    }
+
+    @Test public void tiesAndZeroReadingsKeepCalculatorChoice() {
+        PollutantHistory history = new PollutantHistory();
+        history.samples.add(new PollutantHistory.Sample(100,"a","A",new double[]{0,0,0,0,0,0}));
+        for (var metric : new HistorySeries.Metric[]{HistorySeries.Metric.US_AQI, HistorySeries.Metric.EUROPEAN_AQI}) {
+            var point = HistorySeries.points(history, metric).get(0);
+            assertEquals("PM2.5", point.mainPollutant());
+            assertEquals(0, point.mainConcentration(), 0);
+        }
+    }
+
+    @Test public void missingReportsDoNotCreateMainPollutants() {
+        PollutantHistory history = new PollutantHistory();
+        history.samples.add(new PollutantHistory.Sample(100,"a","A",new double[]{Double.NaN,Double.NaN,Double.NaN,Double.NaN,Double.NaN,Double.NaN}));
+        assertTrue(HistorySeries.points(history, HistorySeries.Metric.US_AQI).isEmpty());
+        assertTrue(HistorySeries.points(history, HistorySeries.Metric.EUROPEAN_AQI).isEmpty());
+    }
+
+    @Test public void concentrationFormattingMatchesHomeAndUsesPollutantUnits() {
+        Locale previous = Locale.getDefault();
+        try {
+            Locale.setDefault(Locale.US);
+            assertEquals("70.0 µg/m³", AirQualityReading.formatConcentration("PM2.5", 70));
+            assertEquals("120 µg/m³", AirQualityReading.formatConcentration("NO2", 120));
+            assertEquals("10.0 mg/m³", AirQualityReading.formatConcentration("CO", 10000));
+            assertEquals("—", AirQualityReading.formatConcentration("PM2.5", Double.NaN));
+            Locale.setDefault(Locale.GERMANY);
+            assertEquals("10,0 mg/m³", AirQualityReading.formatConcentration("CO", 10000));
+        } finally { Locale.setDefault(previous); }
+    }
+
     @Test public void historyIndicesMatchHomeFormulas() {
         AirQualityReading reading = new AirQualityReading();
         reading.pm25=70; reading.pm10=80; reading.o3=45; reading.no2=23; reading.co=1000; reading.so2=9;
