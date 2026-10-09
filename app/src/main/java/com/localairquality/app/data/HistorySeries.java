@@ -30,11 +30,12 @@ public final class HistorySeries {
     public static List<Point> points(PollutantHistory history, Metric metric) {
         List<Point> points = new ArrayList<>();
         if (metric == Metric.US_NOWCAST) {
-            for (var snapshot : history.nowcasts) if (snapshot.aqi() >= 0) points.add(new Point(snapshot.measuredAt(),
+            for (var snapshot : history.nowcasts) if (visible(history, snapshot.stationId()) && snapshot.aqi() >= 0) points.add(new Point(snapshot.measuredAt(),
                     snapshot.stationName(), snapshot.aqi(), snapshot.count(), snapshot.pollutant(), snapshot.concentration(), snapshot.inputs()));
             return points;
         }
         for (PollutantHistory.Sample sample : history.samples) {
+            if (!visible(history, sample.stationId())) continue;
             if (!metric.isIndex()) {
                 double value = sample.values()[metric.pollutant];
                 if (AirQualityReading.isPresent(value)) points.add(new Point(sample.measuredAt(), sample.stationName(), value, 1,
@@ -43,9 +44,7 @@ public final class HistorySeries {
             }
             AirQualityReading reading = new AirQualityReading();
             reading.stationId = sample.stationId();
-            double[] v = sample.values().clone();
-            if (metric == Metric.EUROPEAN_AQI) for (int p = 0; p < 6; p++)
-                if (!NowCast.hourly(sample.stationId(), p) || p == 4) v[p] = Double.NaN;
+            double[] v = sample.values();
             reading.pm25 = v[0]; reading.pm10 = v[1]; reading.o3 = v[2];
             reading.no2 = v[3]; reading.co = v[4]; reading.so2 = v[5];
             int count = reading.availablePollutants();
@@ -66,15 +65,13 @@ public final class HistorySeries {
             Metric mainMetric = Metric.forLabel(mainPollutant);
             double concentration = mainMetric != null && !mainMetric.isIndex()
                     ? v[mainMetric.pollutant] : AirQualityReading.MISSING;
-            List<NowCast.Input> inputs = new ArrayList<>();
-            for (int p = 0; p < 6; p++) inputs.add(new NowCast.Input(v[p],
-                    AqiCalculator.europeanPollutantBand(PollutantHistory.LABELS[p], v[p]),
-                    AirQualityReading.isPresent(v[p]) ? 1 : 0,
-                    NowCast.hourly(sample.stationId(), p) ? "1h mean" : NowCast.HOURLY_NOT_SUPPLIED));
             points.add(new Point(sample.measuredAt(), sample.stationName(), value, count,
-                    mainPollutant, concentration, inputs));
+                    mainPollutant, concentration));
         }
         return points;
+    }
+    private static boolean visible(PollutantHistory history, String station) {
+        return history.activeStationId.isEmpty() || history.activeStationId.equals(station);
     }
     public static int band(Metric metric, double value) {
         if (!AirQualityReading.isPresent(value)) return 0;

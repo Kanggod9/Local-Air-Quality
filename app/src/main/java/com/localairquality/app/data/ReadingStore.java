@@ -16,7 +16,7 @@ public final class ReadingStore {
 
     public static void saveReading(Context context, AirQualityReading reading) {
         HistoryStore.record(context, reading);
-        reading.nowcast = HistoryStore.load(context).latestNowcast(reading.stationId);
+        attachHistory(context, reading);
         try {
             prefs(context).edit().putString(KEY_READING, reading.toJson().toString()).apply();
         } catch (Exception ignored) {
@@ -34,11 +34,18 @@ public final class ReadingStore {
                 HistoryStore.load(context);
                 return null;
             }
-            reading.nowcast = HistoryStore.load(context).latestNowcast(reading.stationId);
+            attachHistory(context, reading);
             return reading;
         } catch (Exception ignored) {
             return null;
         }
+    }
+
+    private static void attachHistory(Context context, AirQualityReading reading) {
+        PollutantHistory history = HistoryStore.load(context);
+        reading.nowcast = history.latestNowcast(reading.stationId);
+        reading.alert = AirQualityAlert.calculate(history, reading.stationId, System.currentTimeMillis());
+        reading.otherStationRecords = history.otherStationRecords(reading.stationId, System.currentTimeMillis());
     }
 
     public static void saveLocation(Context context, double latitude, double longitude, String name) {

@@ -23,6 +23,7 @@ public final class PollutantHistoryActivity extends Activity {
     private HistorySeries.Metric metric;
     private LinearLayout content;
     private LinearLayout calculationInputs;
+    private boolean resumed;
     private static final int INK = 0xFF1F2834, MUTED = 0xFF5B6777, GREEN = 0xFF177A68;
 
     @Override protected void onCreate(Bundle state) {
@@ -46,8 +47,15 @@ public final class PollutantHistoryActivity extends Activity {
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
     }
-    @Override protected void onResume() { super.onResume(); if (content != null) update.run(); }
-    @Override protected void onPause() { handler.removeCallbacks(update); super.onPause(); }
+    @Override protected void onResume() {
+        super.onResume(); resumed = true;
+        if (content != null) update.run();
+        com.localairquality.app.background.HistoryRecoveryCoordinator.recover(this)
+                .whenComplete((complete,error) -> handler.post(() -> {
+                    if (resumed && content != null) render();
+                }));
+    }
+    @Override protected void onPause() { resumed = false; handler.removeCallbacks(update); super.onPause(); }
 
     private void render() {
         com.localairquality.app.background.RefreshCoordinator.refreshIfStale(this);
@@ -55,7 +63,7 @@ public final class PollutantHistoryActivity extends Activity {
         long now = System.currentTimeMillis();
         content.removeAllViews();
         addText(content, metric.label + " history", 28, INK, true);
-        addText(content, "Past 24 hours · " + unit(), 16, MUTED, false);
+        addText(content, "Station history · Past 24 hours · " + unit(), 16, MUTED, false);
         if (!history.stationName.isEmpty()) {
             addText(content, history.countryName + "\nCurrent station: " + history.stationName, 16, INK, true);
         }
@@ -98,7 +106,7 @@ public final class PollutantHistoryActivity extends Activity {
             addLevel(row, band);
             addLevel(row, band + 1);
         }
-        if (metric == HistorySeries.Metric.US_NOWCAST || metric == HistorySeries.Metric.EUROPEAN_AQI) {
+        if (metric == HistorySeries.Metric.US_NOWCAST) {
             calculationInputs = new LinearLayout(this);
             calculationInputs.setOrientation(LinearLayout.VERTICAL);
             content.addView(calculationInputs, new LinearLayout.LayoutParams(-1, -2));
@@ -183,7 +191,7 @@ public final class PollutantHistoryActivity extends Activity {
                     16, INK, true);
         }
         if (calculationInputs != null && !sample.inputs().isEmpty()) showInputs(calculationInputs, sample);
-        if (metric == HistorySeries.Metric.US_NOWCAST || metric == HistorySeries.Metric.EUROPEAN_AQI) {
+        if (metric == HistorySeries.Metric.US_NOWCAST) {
             LinearLayout tiles = new LinearLayout(this);
             tiles.setOrientation(LinearLayout.VERTICAL);
             details.addView(tiles);

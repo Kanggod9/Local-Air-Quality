@@ -40,11 +40,8 @@ public final class AqiCalculator {
     }
 
     public static EuResult europeanAqi(AirQualityReading r) {
-        if (r.stationId.startsWith("nea:")) {
-            int pmBand = europeanPollutantBand("PM2.5", r.pm25);
-            return pmBand == 0 ? new EuResult(0, "No data", "—")
-                    : new EuResult(pmBand, EU_LEVELS[pmBand - 1], "PM2.5");
-        }
+        // Concentration-only app variant: use every supported station reading,
+        // regardless of its averaging period. NowCast validates hourly inputs separately.
         int band = 0;
         String pollutant = "—";
         int candidate = europeanPollutantBand("PM2.5", r.pm25);

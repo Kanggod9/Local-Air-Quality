@@ -14,6 +14,7 @@ import com.localairquality.app.background.RefreshReceiver;
 import com.localairquality.app.data.AirQualityReading;
 import com.localairquality.app.data.AqiCalculator;
 import com.localairquality.app.data.ReadingStore;
+import com.localairquality.app.ui.AlertSymbols;
 
 import java.text.DateFormat;
 import java.util.Date;
@@ -41,13 +42,43 @@ public final class AirQualityWidgetProvider extends AppWidgetProvider {
         PendingIntent open = PendingIntent.getActivity(context, 20, openIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Intent updateIntent = new Intent(context, RefreshReceiver.class)
-                .setAction(RefreshReceiver.ACTION_REFRESH);
+                .setAction(RefreshReceiver.ACTION_REFRESH)
+                .addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
         PendingIntent update = PendingIntent.getBroadcast(context, 21, updateIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         views.setOnClickPendingIntent(R.id.widget_root, open);
         views.setOnClickPendingIntent(R.id.widget_update, update);
+        String status = WidgetRefreshStatus.text(context);
+        views.setTextViewText(R.id.widget_status, status);
+        views.setViewVisibility(R.id.widget_status, status.isEmpty()
+                ? android.view.View.GONE : android.view.View.VISIBLE);
+        // Hosts reapply RemoteViews to an existing layout; omitted actions do not reset it.
+        views.setViewVisibility(R.id.widget_alert, reading != null && reading.alert.active()
+                ? android.view.View.VISIBLE : android.view.View.GONE);
 
-        if (reading == null) return views;
+        views.setTextViewTextSize(R.id.widget_aqi, android.util.TypedValue.COMPLEX_UNIT_SP,
+                reading != null && reading.alert.active() ? 35 : 40);
+        views.setTextViewTextSize(R.id.widget_level, android.util.TypedValue.COMPLEX_UNIT_SP,
+                reading != null && reading.alert.active() ? 15 : 18);
+        if (reading == null) {
+            views.setInt(R.id.aqi_panel, "setBackgroundColor", AqiCalculator.euColor(0));
+            views.setTextColor(R.id.widget_aqi, 0xFF17202A);
+            views.setTextColor(R.id.widget_pollutant, 0xFF17202A);
+            views.setTextViewText(R.id.widget_aqi, context.getString(R.string.not_available));
+            views.setTextViewText(R.id.widget_location, context.getString(R.string.app_name));
+            views.setTextViewText(R.id.widget_station, context.getString(R.string.nearest_official_station));
+            views.setTextViewText(R.id.widget_level, context.getString(R.string.waiting_for_data));
+            views.setTextViewText(R.id.widget_pollutant, context.getString(R.string.waiting_for_data));
+            views.setTextViewText(R.id.widget_eu, context.getString(R.string.european_aqi_empty));
+            views.setTextViewText(R.id.widget_time, context.getString(R.string.empty_time));
+            return views;
+        }
+        if (reading.alert.active()) {
+            views.setViewVisibility(R.id.widget_alert, android.view.View.VISIBLE);
+            views.setInt(R.id.widget_alert, "setBackgroundColor", reading.alert.level().color);
+            views.setTextViewCompoundDrawablesRelative(R.id.widget_alert, AlertSymbols.icon(reading.alert.level()), 0, 0, 0);
+            views.setTextViewText(R.id.widget_alert, reading.alert.message());
+        }
         int color = AqiCalculator.usColor(reading.usAqi);
         int textColor = reading.usAqi >= 151 ? 0xFFFFFFFF : 0xFF17202A;
         views.setInt(R.id.aqi_panel, "setBackgroundColor", color);

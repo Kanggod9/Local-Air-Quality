@@ -86,7 +86,9 @@ public class NowCastTest {
         var reading = NowCast.calculate(samples,NOW,"nea:west","West");
         assertEquals(1,reading.count()); assertEquals("PM2.5",reading.pollutant()); assertEquals(161,reading.aqi());
         AirQualityReading eu = new AirQualityReading(); eu.stationId="nea:west"; eu.pm25=70; eu.o3=1000;
-        assertEquals(4,AqiCalculator.europeanAqi(eu).band());
+        // The European concentration-only variant no longer excludes rolling readings.
+        // This must not relax the independent NowCast restrictions asserted above.
+        assertEquals(6,AqiCalculator.europeanAqi(eu).band());
     }
     @Test public void ozoneOnlyMayOutliveTwentyFourHoursAndChartsNeverShowCalibration() throws Exception {
         PollutantHistory history = new PollutantHistory(); add(history,NOW,20,60,NOW);

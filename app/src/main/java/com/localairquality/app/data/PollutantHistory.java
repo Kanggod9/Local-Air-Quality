@@ -15,12 +15,36 @@ public final class PollutantHistory {
     public long startedAt;
     public String activeStationId = "";
     public long activeStationSince, lastRecoveryCompletedAt;
+    // Chart/recovery start is independent of the latest station visit's request guard.
+    public long activeHistorySince;
     public long lastOzoneRecoveryCompletedAt;
     public final List<Sample> samples = new ArrayList<>();
     public final List<NowCast.Snapshot> nowcasts = new ArrayList<>();
     public final List<Ozone> ozoneCalibration = new ArrayList<>();
     private boolean derivedDirty = true;
     public record Ozone(long measuredAt, String stationId, double value) {}
+
+    public record OtherStationRecords(int records, int stations) {
+        public String message() {
+            if (records == 0) return "";
+            return (records == 1 ? "There is " : "There are ") + records
+                    + (records == 1 ? " record from " : " records from ")
+                    + stations + (stations == 1 ? " other station" : " other stations")
+                    + " in the last 24 hours.";
+        }
+    }
+
+    /** One report per station/timestamp, not one count per pollutant or derived index. */
+    public OtherStationRecords otherStationRecords(String currentStation, long now) {
+        java.util.Map<String, java.util.Set<Long>> reports = new java.util.HashMap<>();
+        for (Sample sample : samples) {
+            if (sample.stationId.isBlank() || sample.stationId.equals(currentStation)
+                    || sample.measuredAt <= 0 || sample.measuredAt < now-WINDOW || sample.measuredAt > now
+                    || Arrays.stream(sample.values).noneMatch(PollutantHistory::present)) continue;
+            reports.computeIfAbsent(sample.stationId, id -> new java.util.HashSet<>()).add(sample.measuredAt);
+        }
+        return new OtherStationRecords(reports.values().stream().mapToInt(java.util.Set::size).sum(), reports.size());
+    }
 
     public record Sample(long measuredAt, String stationId, String stationName, double[] values, int hourlyMask) {
         /** Recovery reports are hourly; NEA exposes an hourly mean only for PM2.5. */
@@ -42,13 +66,13 @@ public final class PollutantHistory {
         }
         prune(now);
         if (!country.equals(countryId)) {
-            samples.clear();
-            nowcasts.clear();
-            ozoneCalibration.clear(); derivedDirty = true;
+            // Retained station records remain hidden and may be resumed within 24 hours.
             startedAt = now;
             activeStationId = "";
         }
         if (!id.equals(activeStationId)) {
+            activeHistorySince = samples.stream().filter(s -> s.stationId.equals(id))
+                    .mapToLong(Sample::measuredAt).min().orElse(now);
             activeStationId = id; activeStationSince = now; lastRecoveryCompletedAt = 0;
             lastOzoneRecoveryCompletedAt = 0;
         }
@@ -109,13 +133,14 @@ public final class PollutantHistory {
 
     public boolean needsRecovery(long now) {
         return !activeStationId.isEmpty() && (lastRecoveryCompletedAt <= 0
+                || Math.floorDiv(now, NowCast.HOUR) > Math.floorDiv(lastRecoveryCompletedAt, NowCast.HOUR)
                 || now < lastRecoveryCompletedAt || now - lastRecoveryCompletedAt >= 15L * 60 * 1000);
     }
 
     public Recovery beginRecovery(long now) {
         if (!needsRecovery(now)) return null;
         long hour = 60L * 60 * 1000;
-        long from = Math.max(now - WINDOW, Math.floorDiv(activeStationSince, hour) * hour);
+        long from = Math.max(now - WINDOW, Math.floorDiv(activeHistorySince, hour) * hour);
         long ozoneFrom = lastOzoneRecoveryCompletedAt <= 0 ? now-OZONE_WINDOW
                 : Math.max(now-OZONE_WINDOW, lastOzoneRecoveryCompletedAt-2*hour);
         return new Recovery(countryId, startedAt, activeStationId, activeStationSince, from, now, ozoneFrom);
@@ -205,7 +230,7 @@ public final class PollutantHistory {
 
     public void write(OutputStream stream) throws IOException {
         DataOutputStream out = new DataOutputStream(stream);
-        out.writeInt(7);
+        out.writeInt(8);
         out.writeUTF(countryId); out.writeUTF(countryName); out.writeUTF(stationName); out.writeUTF(locationName);
         out.writeLong(startedAt);
         out.writeUTF(activeStationId); out.writeLong(activeStationSince); out.writeLong(lastRecoveryCompletedAt);
@@ -227,13 +252,14 @@ public final class PollutantHistory {
         out.writeInt(ozoneCalibration.size());
         for (var ozone : ozoneCalibration) { out.writeLong(ozone.measuredAt); out.writeUTF(ozone.stationId); out.writeDouble(ozone.value); }
         out.writeLong(lastOzoneRecoveryCompletedAt);
+        out.writeLong(activeHistorySince);
         out.flush();
     }
 
     public static PollutantHistory read(InputStream stream) throws IOException {
         DataInputStream in = new DataInputStream(stream);
         int version = in.readInt();
-        if (version < 1 || version > 7) throw new IOException("Unknown history version");
+        if (version < 1 || version > 8) throw new IOException("Unknown history version");
         PollutantHistory history = new PollutantHistory();
         history.countryId = in.readUTF(); history.countryName = in.readUTF();
         history.stationName = in.readUTF(); history.locationName = in.readUTF();
@@ -295,6 +321,14 @@ public final class PollutantHistory {
                 if (!sample.stationId.equals(latest.stationId)) break;
                 history.activeStationSince = Math.max(history.startedAt, sample.measuredAt);
             }
+        }
+        if (version >= 8) history.activeHistorySince = in.readLong();
+        else {
+            history.activeHistorySince = history.samples.stream()
+                    .filter(s -> s.stationId.equals(history.activeStationId))
+                    .mapToLong(Sample::measuredAt).min().orElse(history.activeStationSince);
+            // Older releases recovered only the most recent visit. Repair that gap once.
+            history.lastRecoveryCompletedAt = 0;
         }
         return history;
     }

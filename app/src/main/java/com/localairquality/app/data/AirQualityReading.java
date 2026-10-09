@@ -45,6 +45,8 @@ public final class AirQualityReading {
     public String euLevel = "No data";
     // Derived from retained station history; deliberately not duplicated in the reading JSON cache.
     public NowCast.Snapshot nowcast;
+    public AirQualityAlert.Result alert = AirQualityAlert.NONE;
+    public PollutantHistory.OtherStationRecords otherStationRecords = new PollutantHistory.OtherStationRecords(0,0);
 
     public int availablePollutants() {
         int count = 0;

@@ -5,6 +5,27 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 public class HistoryRecoveryTest {
+    @Test public void newReportingHourBypassesPreviousHourThrottle() {
+        PollutantHistory h = initial();
+        h.completeRecovery(h.beginRecovery(NOW + 59*60000));
+        assertNotNull(h.beginRecovery(NOW + HOUR));
+    }
+
+    @Test public void delayedSameStationReportsFillEveningGapWithoutDuplicatingLatest() {
+        PollutantHistory h = initial();
+        add(h,"SG","a",NOW+4*HOUR);
+        var ticket = h.beginRecovery(NOW+4*HOUR);
+        List<PollutantHistory.Sample> reports = new ArrayList<>();
+        for (int i=0;i<=4;i++) reports.add(new PollutantHistory.Sample(NOW+i*HOUR,"a","A",new double[]{20+i,40,50,30,1000,5}));
+        h.acceptRecovery(ticket,reports,NOW+4*HOUR);
+        h.acceptRecovery(ticket,reports,NOW+4*HOUR);
+        assertTrue(h.completeRecovery(ticket));
+        assertEquals(5,h.samples.size());
+        assertEquals(5,HistorySeries.points(h,HistorySeries.Metric.US_AQI).size());
+        assertEquals(5,HistorySeries.points(h,HistorySeries.Metric.EUROPEAN_AQI).size());
+        h.updateNowcasts(NOW+4*HOUR);
+        assertEquals(5,HistorySeries.points(h,HistorySeries.Metric.US_NOWCAST).size());
+    }
     private static final long HOUR = 3600000, NOW = 100 * PollutantHistory.WINDOW;
     private PollutantHistory initial() {
         PollutantHistory h = new PollutantHistory();
@@ -51,7 +72,7 @@ public class HistoryRecoveryTest {
         add(h,"MY","b",NOW+HOUR);
         add(h,"SG","a",NOW+2*HOUR);
         assertFalse(h.acceptRecovery(old,List.of(),NOW+2*HOUR));
-        assertEquals(1,h.samples.size());
+        assertEquals(3,h.samples.size());
     }
     @Test public void recoveryStateSurvivesRestartAndWindowIsBounded() throws Exception {
         PollutantHistory h = initial();
@@ -80,12 +101,14 @@ public class HistoryRecoveryTest {
         assertTrue(h.needsRecovery(NOW+HOUR));
     }
     @Test public void upgradeDiscardsOldAttemptThrottleButKeepsHistory() throws Exception {
-        PollutantHistory h = initial();
-        h.lastRecoveryCompletedAt = NOW;
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream(); h.write(bytes);
-        byte[] encoded = bytes.toByteArray();
-        encoded[3] = 3; // v3 uses the same layout but this timestamp means an ATTEMPT.
-        PollutantHistory restored = PollutantHistory.read(new ByteArrayInputStream(encoded));
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(bytes);
+        out.writeInt(3);
+        out.writeUTF("SG"); out.writeUTF("Singapore"); out.writeUTF("a"); out.writeUTF("Home");
+        out.writeLong(NOW); out.writeUTF("a"); out.writeLong(NOW); out.writeLong(NOW);
+        out.writeInt(1); out.writeLong(NOW); out.writeUTF("a"); out.writeUTF("a");
+        for (double value : new double[]{48,70,45,23,1000,9}) out.writeDouble(value);
+        PollutantHistory restored = PollutantHistory.read(new ByteArrayInputStream(bytes.toByteArray()));
         assertTrue(restored.needsRecovery(NOW+1));
         assertEquals(1,restored.samples.size());
         assertEquals(NOW,restored.activeStationSince);

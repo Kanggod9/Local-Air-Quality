@@ -11,6 +11,10 @@
     <string name="european_aqi_empty">European AQI —</string>
     <string name="empty_time">—:—</string>
     <string name="refresh_symbol">↻</string>
+    <string name="widget_updating">Updating…</string>
+    <string name="widget_update_queued">Update queued</string>
+    <string name="widget_checked">Checked %1$s</string>
+    <string name="widget_update_failed">Update failed · tap ↻</string>
+    <string name="widget_open_app">Open app to set location</string>
 </resources>
-
 

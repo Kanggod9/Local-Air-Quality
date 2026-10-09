@@ -10,8 +10,8 @@ android {
         applicationId = "com.localairquality.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.4.1"
+        versionCode = 22
+        versionName = "1.5.3"
     }
 
     buildTypes {
@@ -46,7 +46,6 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }
-
 
 
 

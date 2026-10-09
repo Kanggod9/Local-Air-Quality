@@ -4,10 +4,11 @@ Local Air Quality is an Android app that shows air quality where you are.
 
 ## Features
 
-- US AQI+ and European AQI with color-coded levels.
+- US AQI+ and concentration-based European AQI with color-coded levels.
 - US NowCast with calculation inputs.
 - PM2.5, PM10, O3, NO2, CO, and SO2 readings.
 - 24-hour history charts.
+- Air quality alerts with reasons and advice.
 - Simple health tips based on air quality.
 - Automatic updates and pull-to-refresh.
 - Ongoing notification and home-screen widget with update buttons.

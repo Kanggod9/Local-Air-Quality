@@ -30,9 +30,15 @@
         </activity>
 
         <activity android:name=".PollutantHistoryActivity" android:exported="false" />
+        <activity android:name=".AlertDetailsActivity" android:exported="false" />
 
         <service
             android:name=".background.HistoryRecoveryJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <service
+            android:name=".background.ManualRefreshJobService"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
 
@@ -67,4 +73,3 @@
         </receiver>
     </application>
 </manifest>
-

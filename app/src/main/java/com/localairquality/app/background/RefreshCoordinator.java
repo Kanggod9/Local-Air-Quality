@@ -20,6 +20,22 @@ public final class RefreshCoordinator {
 
     private RefreshCoordinator() {}
 
+    /** Re-evaluate rolling alerts after expiry/catch-up, even without a newer live reading. */
+    public static synchronized void updateDisplays(Context context) {
+        AirQualityReading cached = ReadingStore.loadReading(context);
+        try {
+            if (cached == null) AirQualityNotification.clear(context);
+            else AirQualityNotification.show(context, cached);
+        } catch (RuntimeException error) {
+            Log.w("LocalAirQuality", "Notification update failed", error);
+        }
+        try {
+            AirQualityWidgetProvider.updateAll(context, cached);
+        } catch (RuntimeException error) {
+            Log.w("LocalAirQuality", "Widget update failed", error);
+        }
+    }
+
     public interface Callback {
         void onSuccess(AirQualityReading reading);
         void onError(Exception error);
@@ -87,12 +103,12 @@ public final class RefreshCoordinator {
             }
             // Enqueue before notifying the Activity: closing it must not cancel recovery.
             RefreshScheduler.scheduleRecovery(appContext);
+            HistoryRecoveryCoordinator.recover(appContext);
             if (callback != null) callback.onSuccess(reading);
         });
         return current;
     }
 }
-
 
 
 

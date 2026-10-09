@@ -69,6 +69,7 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
         @Override public void run() {
             if (!flow.isBusy()) {
                 RefreshCoordinator.refreshIfStale(MainActivity.this);
+                RefreshCoordinator.updateDisplays(MainActivity.this);
                 AirQualityReading cached = ReadingStore.loadReading(MainActivity.this);
                 if (cached != null && !airQualityView.needsRetry()) airQualityView.showReading(cached, false);
             }
@@ -125,6 +126,7 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
     protected void onResume() {
         super.onResume();
         RefreshScheduler.scheduleRecovery(this);
+        recoverAndShowHistory();
         mainHandler.post(automaticUpdate);
         if (airQualityView != null && hasLocationPermission() && locationEnabled()
                 && airQualityView.needsRetry()) {
@@ -156,6 +158,10 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
     @Override
     public void onPollutantSelected(String pollutant) {
         startActivity(new Intent(this, PollutantHistoryActivity.class).putExtra("pollutant", pollutant));
+    }
+
+    @Override public void onAlertSelected() {
+        startActivity(new Intent(this, AlertDetailsActivity.class));
     }
 
     private void configureWindow() {
@@ -358,6 +364,7 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
                     if (!flow.finish(requestId)) return;
                     finishRefreshTimeout();
                     airQualityView.showReading(reading, false);
+                    recoverAndShowHistory();
                     requestNotificationPermissionIfNeeded();
                 });
             }
@@ -376,6 +383,15 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
     private void finishRefreshTimeout() {
         if (refreshTimeout != null) mainHandler.removeCallbacks(refreshTimeout);
         refreshTimeout = null;
+    }
+
+    private void recoverAndShowHistory() {
+        com.localairquality.app.background.HistoryRecoveryCoordinator.recover(this)
+                .whenComplete((complete,error) -> mainHandler.post(() -> {
+                    if (isDestroyed() || isFinishing() || flow.isBusy()) return;
+                    AirQualityReading cached = ReadingStore.loadReading(this);
+                    if (cached != null && !airQualityView.needsRetry()) airQualityView.showReading(cached, false);
+                }));
     }
 
     private void cancelPendingFlow() {
@@ -497,6 +513,5 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
         }
     }
 }
-
 
 

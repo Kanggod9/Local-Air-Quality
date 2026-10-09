@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.job.JobParameters;
 import android.app.job.JobService;
 import android.content.pm.PackageManager;
+import android.content.Context;
 import android.location.Location;
 import android.location.LocationManager;
 
@@ -19,10 +20,11 @@ public final class RefreshJobService extends JobService {
     @Override
     public boolean onStartJob(JobParameters params) {
         com.localairquality.app.data.HistoryStore.load(this);
+        RefreshCoordinator.updateDisplays(this);
         if (params.getJobId() == RefreshScheduler.CLEANUP_JOB_ID) return false;
         ReadingStore.SavedLocation saved = ReadingStore.loadLocation(this);
         if (saved == null) return false;
-        ReadingStore.SavedLocation target = newestAvailableLocation(saved);
+        ReadingStore.SavedLocation target = newestAvailableLocation(this, saved);
         active = params;
         refresh = RefreshCoordinator.refresh(this, target.latitude(), target.longitude(), target.name(),
                 new RefreshCoordinator.Callback() {
@@ -54,12 +56,12 @@ public final class RefreshJobService extends JobService {
         return true;
     }
 
-    private ReadingStore.SavedLocation newestAvailableLocation(ReadingStore.SavedLocation saved) {
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+    static ReadingStore.SavedLocation newestAvailableLocation(Context context, ReadingStore.SavedLocation saved) {
+        if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
+                && context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) return saved;
         try {
-            LocationManager manager = getSystemService(LocationManager.class);
+            LocationManager manager = context.getSystemService(LocationManager.class);
             if (manager == null) return saved;
             Location newest = null;
             for (String provider : manager.getProviders(true)) {
@@ -81,5 +83,4 @@ public final class RefreshJobService extends JobService {
         }
     }
 }
-
 

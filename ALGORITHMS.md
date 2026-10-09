@@ -1,10 +1,10 @@
-# AQI calculations — v1.4.0
+# AQI calculations — v1.5.3
 
 ## Display
 
 The original US AQI+ and European AQI cards keep their size and order. Notifications and widgets still use those original indices. The additional US NowCast card is below them. Main-page pollutant values are unchanged.
 
-Tap US NowCast to see its last 24 hours and the concentrations used for calculation. Tap a chart point to inspect that time, including its main pollutant. European AQI history also shows its calculation inputs.
+Tap US NowCast to see its last 24 hours and the concentrations used for calculation. Tap a chart point to inspect that time, including its main pollutant. European AQI history matches the US AQI+ history page: a chart and a tapped-point summary with the main pollutant and concentration.
 
 ## US NowCast
 
@@ -36,9 +36,11 @@ Gas mass concentrations are converted to mixing ratios using 24.45 L/mol (25 °C
 
 Source: [EPA technical assistance document, May 2026](https://document.airnow.gov/technical-assistance-document-for-the-reporting-of-daily-air-quailty.pdf).
 
-## Latest European AQI
+## European AQI: concentration-only app variant
 
-There is no extra weighted European index: the latest official EEA method uses hourly means for PM2.5, PM10, O3, NO2 and SO2, with the worst available category setting the index. CO is excluded. The former rolling 24-hour particle method is not used.
+The app applies the latest EEA concentration bands to every available PM2.5, PM10, O3, NO2 and SO2 reading from the station. The worst available category sets the index. CO is excluded because it has no EEA bands. Missing readings are not invented, and reports from different stations or times are not combined in a history point.
+
+The app does not require these readings to be hourly means or calculate a new rolling European average. Station-reported rolling means and maxima may also contribute. This concentration-only variant is not the official hourly EEA index, whose methodology requires hourly means. This change does not relax the separate US NowCast hourly-data requirements.
 
 Upper concentration limits in µg/m³:
 
@@ -57,7 +59,7 @@ Sources: [EEA methodology](https://airindex.eea.europa.eu/AQI/) and [EEA revisio
 ## Data and retention limits
 
 - OpenAQ NowCast uses the verified `/hours` endpoint. Unverified `/latest` readings cannot replace verified hourly calculation inputs. See [OpenAQ measurements documentation](https://docs.openaq.org/resources/measurements).
-- Singapore's current NEA feeds supply a true hourly mean for PM2.5, but the other supplied fields are rolling means or maxima. Those other fields are excluded from new NowCast and hourly EEA calculations, while remaining visible unchanged in the main pollutant tiles. Coverage is marked Partial.
+- Singapore's current NEA feeds supply a true hourly mean for PM2.5, but the other supplied fields are rolling means or maxima. Those other fields remain excluded from NowCast; they contribute to the concentration-only European AQI and remain visible unchanged in the main pollutant tiles. Partial means a required supported reading is unavailable, not that European readings failed an hourly-mean check.
 - All visible charts, non-ozone raw observations and calculated index snapshots expire after 24 hours. Only ozone calibration observations may remain up to 14 days; they are not shown in older chart history. Cleanup runs when history is read, recorded or updated. No background cleanup can run while Android force-stops the app.
-- A recorded NowCast keeps its calculated inputs while its snapshot remains within 24 hours, even after older source observations expire. Station histories are not mixed; changing country clears the previous country's stored history.
+- A recorded NowCast keeps its calculated inputs while its snapshot remains within 24 hours, even after older source observations expire. Charts show only the current station. A newly selected station starts a fresh chart; returning to a station with a record still within 24 hours resumes that station's chart and retrieves missed reports. If its last record has expired, it starts fresh. Other stations' retained records stay hidden and expire normally, including across country changes. Ozone calibration alone does not qualify a station's chart for resumption.
 - Two weeks of storage does not guarantee model eligibility: the station must actually provide enough valid hourly ozone. Until then, the reference surrogate or an unavailable state is used.

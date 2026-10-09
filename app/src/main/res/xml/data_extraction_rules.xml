@@ -2,9 +2,10 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="air_quality.xml" />
+        <exclude domain="sharedpref" path="widget_refresh.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="air_quality.xml" />
+        <exclude domain="sharedpref" path="widget_refresh.xml" />
     </device-transfer>
 </data-extraction-rules>
-

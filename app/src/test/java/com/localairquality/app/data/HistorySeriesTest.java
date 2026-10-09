@@ -4,15 +4,14 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 public class HistorySeriesTest {
-    @Test public void neaEuropeanInputsExplainUnsupportedMeasurements() {
+    @Test public void neaEuropeanHistoryUsesAllSupportedConcentrationsWithoutHourlyGrid() {
         PollutantHistory history = new PollutantHistory();
         history.samples.add(new PollutantHistory.Sample(100,"nea:west","West",new double[]{41,45,9,45,1000,4}));
         var point = HistorySeries.points(history, HistorySeries.Metric.EUROPEAN_AQI).get(0);
-        assertFalse(point.inputs().get(0).hourlyNotSupplied());
-        for (int p : new int[]{1,2,3,5}) {
-            assertTrue(point.inputs().get(p).hourlyNotSupplied());
-            assertEquals("Required hourly measurement not supplied", point.inputs().get(p).unavailableReason());
-        }
+        assertEquals(5, point.availablePollutants());
+        assertEquals(3, point.value(), 0);
+        assertEquals("PM2.5", point.mainPollutant());
+        assertTrue(point.inputs().isEmpty());
     }
 
     @Test public void missingHistoryAndLegacyProviderLimitationHaveDifferentMessages() {

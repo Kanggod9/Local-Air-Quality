@@ -42,15 +42,17 @@ public class PollutantHistoryTest {
         assertEquals("Station a", h.samples.get(0).stationName());
         assertEquals("Station b", h.samples.get(1).stationName());
     }
-    @Test public void countryChangeClearsAllAndReturningDoesNotRestore() {
+    @Test public void countryChangeHidesOtherStationsAndRetainsRecentRecordsForReturning() {
         PollutantHistory h = new PollutantHistory();
         add(h, "a", NOW - HOUR, NOW);
         h.add("MY", "Malaysia", "b", "Station b", "Away", times(NOW), values(20), NOW + 1);
-        assertEquals(1, h.samples.size());
+        assertEquals(2, h.samples.size());
         assertEquals(NOW + 1, h.startedAt);
+        assertEquals("Station b",HistorySeries.points(h,HistorySeries.Metric.US_AQI).get(0).stationName());
         add(h, "a", NOW, NOW + 2);
-        assertEquals(1, h.samples.size());
+        assertEquals(3, h.samples.size());
         assertEquals("a", h.samples.get(0).stationId());
+        assertEquals(2,HistorySeries.points(h,HistorySeries.Metric.US_AQI).size());
     }
     @Test public void expiryUsesReportedTimeAndIncludesExactBoundary() {
         PollutantHistory h = new PollutantHistory();

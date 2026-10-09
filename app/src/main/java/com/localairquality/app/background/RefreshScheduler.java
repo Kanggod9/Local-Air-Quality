@@ -4,14 +4,54 @@ import android.app.job.JobInfo;
 import android.app.job.JobScheduler;
 import android.content.ComponentName;
 import android.content.Context;
+import android.os.Build;
+
+import com.localairquality.app.data.ReadingStore;
+import com.localairquality.app.widget.WidgetRefreshStatus;
 
 public final class RefreshScheduler {
     static final int CLEANUP_JOB_ID = 40252;
     private static final int JOB_ID = 40251;
     private static final int RECOVERY_JOB_ID = 40253;
+    public static final int MANUAL_JOB_ID = 40254;
     private static final long POLL_INTERVAL = 15L * 60L * 1000L;
 
     private RefreshScheduler() {}
+
+    public static synchronized void requestManualRefresh(Context context) {
+        JobScheduler scheduler = context.getSystemService(JobScheduler.class);
+        if (ReadingStore.loadLocation(context) == null) {
+            WidgetRefreshStatus.set(context, WidgetRefreshStatus.OPEN_APP);
+            return;
+        }
+        try {
+            if (scheduler == null) {
+                WidgetRefreshStatus.set(context, WidgetRefreshStatus.FAILED);
+                return;
+            }
+            // Repeated taps must not cancel/restart the running download.
+            if (scheduler.getPendingJob(MANUAL_JOB_ID) != null) return;
+            JobInfo.Builder builder = new JobInfo.Builder(MANUAL_JOB_ID,
+                    new ComponentName(context, ManualRefreshJobService.class))
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY);
+            int result;
+            if (Build.VERSION.SDK_INT >= 31) {
+                result = scheduler.schedule(builder.setExpedited(true).build());
+                if (result == JobScheduler.RESULT_FAILURE) {
+                    // Expedited quota can be exhausted; still enqueue the request.
+                    result = scheduler.schedule(builder.setExpedited(false).build());
+                }
+            } else {
+                if (Build.VERSION.SDK_INT >= 28) builder.setImportantWhileForeground(true);
+                result = scheduler.schedule(builder.build());
+            }
+            WidgetRefreshStatus.set(context, result == JobScheduler.RESULT_SUCCESS
+                    ? WidgetRefreshStatus.QUEUED : WidgetRefreshStatus.FAILED);
+        } catch (RuntimeException error) {
+            android.util.Log.w("LocalAirQuality", "Could not schedule manual refresh", error);
+            WidgetRefreshStatus.set(context, WidgetRefreshStatus.FAILED);
+        }
+    }
 
     public static void schedule(Context context) {
         JobScheduler scheduler = context.getSystemService(JobScheduler.class);
@@ -46,6 +86,5 @@ public final class RefreshScheduler {
                 .setPersisted(true).build());
     }
 }
-
 
 
