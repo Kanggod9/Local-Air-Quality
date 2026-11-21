@@ -13,20 +13,53 @@ final class NeaRepository {
     private static final String PM25_URL = "https://api.data.gov.sg/v1/environment/pm25";
     private static final String PSI_FALLBACK_URL = "https://api-open.data.gov.sg/v2/real-time/api/psi";
     private static final String PM25_FALLBACK_URL = "https://api-open.data.gov.sg/v2/real-time/api/pm25";
+    private static final java.util.concurrent.ExecutorService REQUESTS = java.util.concurrent.Executors.newFixedThreadPool(2);
 
     private NeaRepository() {}
 
+    // Published NEA reporting-region coordinates, usable even when metadata requests fail.
+    static AirQualityReading target(double latitude, double longitude, String locationName) {
+        String[] names={"central","east","north","south","west"};
+        double[] lats={1.35735,1.35735,1.41803,1.29587,1.35735};
+        double[] lons={103.82,103.94,103.82,103.82,103.7};
+        int best=0; double distance=Double.MAX_VALUE;
+        for(int i=0;i<5;i++) {
+            double d=distanceKm(latitude,longitude,lats[i],lons[i]);
+            if(d<distance) { distance=d; best=i; }
+        }
+        AirQualityReading r=new AirQualityReading();
+        r.stationId="nea:"+names[best]; r.stationName=titleCase(names[best])+" reporting region";
+        r.locationName=locationName; r.latitude=lats[best]; r.longitude=lons[best]; r.distanceKm=distance;
+        r.countryCode="SG"; r.countryName="Singapore"; r.sourceName="Singapore National Environment Agency";
+        return r;
+    }
+
     static AirQualityReading fetch(double latitude, double longitude, String locationName) throws Exception {
+        return latestOfficial(() -> fetchFrom(PSI_URL,PM25_URL,latitude,longitude,locationName),
+                () -> fetchFrom(PSI_FALLBACK_URL,PM25_FALLBACK_URL,latitude,longitude,locationName),System.currentTimeMillis());
+    }
+    static AirQualityReading latestOfficial(BackupPolicy.Fetch first, BackupPolicy.Fetch alternate, long now) throws Exception {
+        AirQualityReading primary=null;
+        Exception error=null;
         try {
-            return fetchFrom(PSI_URL, PM25_URL, latitude, longitude, locationName);
+            primary=first.get();
+            if(BackupPolicy.fresh(primary.measuredAtMillis,Math.max(now,primary.fetchedAtMillis))) return primary;
         } catch (Exception primaryError) {
-            try {
-                return fetchFrom(PSI_FALLBACK_URL, PM25_FALLBACK_URL,
-                        latitude, longitude, locationName);
-            } catch (Exception fallbackError) {
-                primaryError.addSuppressed(fallbackError);
-                throw primaryError;
-            }
+            if(primaryError instanceof InterruptedException) Thread.currentThread().interrupt();
+            if(Thread.currentThread().isInterrupted() || primaryError instanceof java.util.concurrent.CancellationException)
+                throw new java.util.concurrent.CancellationException("Refresh cancelled");
+            error=primaryError;
+        }
+        try {
+            var fallback=alternate.get();
+            return primary==null || fallback.measuredAtMillis>primary.measuredAtMillis ? fallback : primary;
+        } catch(Exception fallbackError) {
+            if(fallbackError instanceof InterruptedException) Thread.currentThread().interrupt();
+            if(Thread.currentThread().isInterrupted() || fallbackError instanceof java.util.concurrent.CancellationException)
+                throw new java.util.concurrent.CancellationException("Refresh cancelled");
+            if(primary!=null) return primary;
+            if(error!=null) { error.addSuppressed(fallbackError); throw error; }
+            throw fallbackError;
         }
     }
 
@@ -37,8 +70,14 @@ final class NeaRepository {
             double longitude,
             String locationName
     ) throws Exception {
-        JSONObject psiData = payload(Network.getJson(psiUrl, null));
-        JSONObject pmData = payload(Network.getJson(pm25Url, null));
+        var psiRequest=REQUESTS.submit(() -> Network.getJsonFast(psiUrl,null));
+        var pmRequest=REQUESTS.submit(() -> Network.getJsonFast(pm25Url,null));
+        JSONObject psiData, pmData;
+        try { psiData=payload(psiRequest.get()); pmData=payload(pmRequest.get()); }
+        catch(java.util.concurrent.ExecutionException error) {
+            if(error.getCause() instanceof Exception cause) throw cause;
+            throw error;
+        } finally { psiRequest.cancel(true); pmRequest.cancel(true); }
 
         Map<String, Region> regions = parseRegions(metadata(psiData));
         Region nearest = null;
@@ -52,9 +91,9 @@ final class NeaRepository {
         }
         if (nearest == null) throw new AirQualityRepository.NoStationException("No official station data nearby");
 
-        JSONObject psiItem = psiData.getJSONArray("items").getJSONObject(0);
+        JSONObject psiItem = latestItem(psiData.getJSONArray("items"));
         JSONObject readings = psiItem.getJSONObject("readings");
-        JSONObject pmItem = pmData.getJSONArray("items").getJSONObject(0);
+        JSONObject pmItem = latestItem(pmData.getJSONArray("items"));
         JSONObject currentPm = pmItem.getJSONObject("readings").getJSONObject("pm25_one_hourly");
         String region = nearest.name;
 
@@ -91,6 +130,16 @@ final class NeaRepository {
     private static JSONObject payload(JSONObject root) {
         JSONObject data = root.optJSONObject("data");
         return data == null ? root : data;
+    }
+    static JSONObject latestItem(JSONArray items) throws Exception {
+        JSONObject latest=null; long time=Long.MIN_VALUE;
+        for(int i=0;i<items.length();i++) {
+            JSONObject item=items.getJSONObject(i);
+            long candidate=OffsetDateTime.parse(item.getString("timestamp")).toInstant().toEpochMilli();
+            if(candidate>time) { latest=item; time=candidate; }
+        }
+        if(latest==null) throw new Exception("Official readings unavailable");
+        return latest;
     }
 
     private static JSONArray metadata(JSONObject data) throws Exception {

@@ -1,4 +1,4 @@
-# AQI calculations — v1.5.3
+# AQI calculations — v1.6.0
 
 ## Display
 
@@ -55,6 +55,18 @@ Upper concentration limits in µg/m³:
 Above the final limit is Extremely poor. The displayed 1–6 value is a category number, not a continuous US-style score. For example, PM2.5 of 70 µg/m³ is Poor under this latest standard.
 
 Sources: [EEA methodology](https://airindex.eea.europa.eu/AQI/) and [EEA revision report](https://www.eionet.europa.eu/etcs/etc-he/products/etc-he-products/etc-he-reports/etc-he-report-2024-17-eeas-revision-of-the-european-air-quality-index-bands).
+
+## OpenAQ backup
+
+Every refresh checks the official source first. HTTP failure, missing measurements, or a latest measurement more than three hours old triggers a search for a fresh OpenAQ backup. Singapore also checks its alternate official endpoint when the primary endpoint returns old data. An OpenAQ API key is entered through the station card's backup settings and kept in private app storage.
+
+The app checks actual latest measurements at nearby fixed government/reference monitors in distance order within 25 km. Missing, future, and older-than-three-hour pollutant values are excluded. If there is no usable backup, the last available reading keeps its original measurement time and a status message explains the problem. Availability depends on OpenAQ coverage and the user key.
+
+Official and backup records are kept separately for the last 24 hours. During backup mode, charts show only the current OpenAQ backup station, with a red outline around each point and unchanged pollution-level fill colors. Official records remain saved but hidden. Changing backup stations does not join their charts. When the official source resumes, charts return to its retained records and its API is used to recover missing hours. Missing official hours are never filled with backup values.
+
+Alert thresholds, independent US/European counting, eight-hour requirement and timing rules are unchanged. Backup mode uses only the current backup station’s recorded hours. Once the official source returns, alerts use only that official station’s last 24 hours, including recovered official reports. Official and backup hours are never added together. The app, notification and widget share the recalculated alert; recovery can increase, decrease or remove it.
+
+NowCast calculations remain separate for each real source station. Verified OpenAQ hourly recovery supplies backup NowCast inputs; station changes never join particle or ozone calculation windows. Backup raw reports and snapshots expire after 24 hours, with only actual hourly ozone calibration retained for up to 14 days. Normal hourly background updates, manual refresh and foreground recovery continue checking the primary source; Android may defer background work.
 
 ## Data and retention limits
 

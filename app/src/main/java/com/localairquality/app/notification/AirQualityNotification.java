@@ -63,7 +63,8 @@ public final class AirQualityNotification {
                 + "  •  EU " + reading.euBand + " " + reading.euLevel + "  •  " + time;
         var alert = reading.alert;
         String expanded = (alert.active() ? alert.message()+"\n\n" : "")
-                + text + "\n" + reading.stationName + " • " + reading.mainPollutant;
+                + text + "\n" + reading.sourceLabel() + " • " + reading.mainPollutant
+                + (reading.backupNotice().isEmpty()?"":"\n"+reading.backupNotice());
         Notification.Builder builder = new Notification.Builder(context, CHANNEL_ID)
                 .setSmallIcon(AlertSymbols.icon(alert.level()))
                 .setContentTitle(alert.active() ? alert.level().title+" · "+alert.timeLabel()+" · "+reading.locationName : reading.locationName)

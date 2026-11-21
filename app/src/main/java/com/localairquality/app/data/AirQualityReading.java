@@ -19,6 +19,25 @@ public final class AirQualityReading {
     public double distanceKm;
     public long measuredAtMillis;
     public long fetchedAtMillis;
+    // A backup keeps its actual source identity; primary anchors its chart and recovery.
+    public AirQualityReading primary;
+    public String backupStatus = "";
+    public boolean backupKeyRequired;
+    public boolean isBackup() { return primary != null; }
+    public String historyStationId() { return isBackup() ? primary.stationId : stationId; }
+    public String historyStationName() { return isBackup() ? primary.stationName : stationName; }
+    public String sourceLabel() { return stationName + (isBackup() ? " (OpenAQ, backup)" : ""); }
+    public String backupNotice() {
+        return isBackup() ? "OpenAQ backup · " + backupStatus : backupStatus;
+    }
+    public double[] values() { return new double[]{pm25,pm10,o3,no2,co,so2}; }
+    public void setValue(int p, double value) {
+        switch (p) {
+            case 0 -> pm25=value; case 1 -> pm10=value; case 2 -> o3=value;
+            case 3 -> no2=value; case 4 -> co=value; case 5 -> so2=value;
+            default -> throw new IllegalArgumentException("Unknown pollutant");
+        }
+    }
     // Same order as PollutantHistory.LABELS; zero means no reported timestamp.
     public final long[] pollutantMeasuredAtMillis = new long[6];
     // Persisted so recovery can run after process death without another successful live fetch.
@@ -104,6 +123,9 @@ public final class AirQualityReading {
         json.put("distanceKm", distanceKm);
         json.put("measuredAtMillis", measuredAtMillis);
         json.put("fetchedAtMillis", fetchedAtMillis);
+        if (primary != null) json.put("primary", primary.toJson());
+        json.put("backupStatus", backupStatus);
+        json.put("backupKeyRequired", backupKeyRequired);
         org.json.JSONArray times = new org.json.JSONArray();
         for (long time : pollutantMeasuredAtMillis) times.put(time);
         json.put("pollutantMeasuredAtMillis", times);
@@ -142,6 +164,10 @@ public final class AirQualityReading {
         reading.distanceKm = json.optDouble("distanceKm", 0);
         reading.measuredAtMillis = json.optLong("measuredAtMillis", 0);
         reading.fetchedAtMillis = json.optLong("fetchedAtMillis", 0);
+        JSONObject primary = json.optJSONObject("primary");
+        if (primary != null && !primary.has("primary")) reading.primary = fromJson(primary.toString());
+        reading.backupStatus = json.optString("backupStatus", "");
+        reading.backupKeyRequired = json.optBoolean("backupKeyRequired", false);
         org.json.JSONArray times = json.optJSONArray("pollutantMeasuredAtMillis");
         if (times != null) for (int p = 0; p < 6; p++) {
             reading.pollutantMeasuredAtMillis[p] = times.optLong(p, 0);
@@ -182,6 +208,7 @@ public final class AirQualityReading {
         return json.has(key) ? json.optDouble(key, MISSING) : MISSING;
     }
 }
+
 
 
 

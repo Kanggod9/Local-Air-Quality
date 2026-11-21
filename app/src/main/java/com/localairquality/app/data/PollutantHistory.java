@@ -19,6 +19,8 @@ public final class PollutantHistory {
     public long activeHistorySince;
     public long lastOzoneRecoveryCompletedAt;
     public final List<Sample> samples = new ArrayList<>();
+    public record BackupSample(String primaryStationId, Sample reading) {}
+    public final List<BackupSample> backups = new ArrayList<>();
     public final List<NowCast.Snapshot> nowcasts = new ArrayList<>();
     public final List<Ozone> ozoneCalibration = new ArrayList<>();
     private boolean derivedDirty = true;
@@ -46,12 +48,50 @@ public final class PollutantHistory {
         return new OtherStationRecords(reports.values().stream().mapToInt(java.util.Set::size).sum(), reports.size());
     }
 
-    public record Sample(long measuredAt, String stationId, String stationName, double[] values, int hourlyMask) {
+    /** backup is display provenance, reconstructed from persisted BackupSample records. */
+    public record Sample(long measuredAt, String stationId, String stationName, double[] values, int hourlyMask,
+                         boolean backup) {
+        public Sample(long time, String id, String name, double[] values, int hourlyMask) {
+            this(time, id, name, values, hourlyMask, false);
+        }
         /** Recovery reports are hourly; NEA exposes an hourly mean only for PM2.5. */
         public Sample(long time, String id, String name, double[] values) {
             this(time, id, name, values, id.startsWith("nea:") ? 1 : 63);
         }
         public boolean isHourly(int pollutant) { return (hourlyMask & (1 << pollutant)) != 0; }
+    }
+
+    public void addBackup(String primaryId, Sample reading, long now) {
+        if(primaryId.isBlank() || !primaryId.equals(activeStationId) || !reading.stationId.startsWith("openaq:")
+                || reading.measuredAt<=0 || reading.measuredAt>now || reading.measuredAt<now-WINDOW) return;
+        for(int i=0;i<backups.size();i++) {
+            var old=backups.get(i);
+            if(old.primaryStationId.equals(primaryId) && old.reading.stationId.equals(reading.stationId)
+                    && old.reading.measuredAt==reading.measuredAt) {
+                double[] values=old.reading.values.clone(); int mask=old.reading.hourlyMask;
+                for(int p=0;p<6;p++) if(present(reading.values[p])) {
+                    if(!old.reading.isHourly(p) || reading.isHourly(p)) values[p]=reading.values[p];
+                    mask |= reading.hourlyMask & (1<<p);
+                }
+                if(Arrays.equals(values,old.reading.values) && mask==old.reading.hourlyMask) return;
+                backups.set(i,new BackupSample(primaryId,new Sample(reading.measuredAt,reading.stationId,reading.stationName,values,mask)));
+                derivedDirty=true; return;
+            }
+        }
+        if(Arrays.stream(reading.values).noneMatch(PollutantHistory::present)) return;
+        backups.add(new BackupSample(primaryId,reading)); derivedDirty=true;
+        activeHistorySince=Math.min(activeHistorySince,reading.measuredAt);
+    }
+
+    public boolean acceptBackupRecovery(Recovery request, String source, List<Sample> reports, long now) {
+        if(!matches(request)) return false;
+        for(var report:reports) {
+            if(!report.stationId.equals(source) || report.measuredAt>request.to || report.measuredAt>now) continue;
+            if(report.isHourly(2) && report.measuredAt>0 && report.measuredAt>=Math.max(now-OZONE_WINDOW,request.ozoneFrom)
+                    && present(report.values[2])) mergeOzone(report.measuredAt,source,report.values[2]);
+            if(report.measuredAt>=request.from) addBackup(request.stationId,report,now);
+        }
+        prune(now); return true;
     }
 
     private static int liveMask(String id) {
@@ -73,6 +113,8 @@ public final class PollutantHistory {
         if (!id.equals(activeStationId)) {
             activeHistorySince = samples.stream().filter(s -> s.stationId.equals(id))
                     .mapToLong(Sample::measuredAt).min().orElse(now);
+            activeHistorySince=Math.min(activeHistorySince,backups.stream().filter(b -> b.primaryStationId.equals(id))
+                    .mapToLong(b -> b.reading.measuredAt).min().orElse(now));
             activeStationId = id; activeStationSince = now; lastRecoveryCompletedAt = 0;
             lastOzoneRecoveryCompletedAt = 0;
         }
@@ -93,25 +135,35 @@ public final class PollutantHistory {
     private static boolean present(double value) { return Double.isFinite(value) && value >= 0; }
 
     private void merge(long time, String id, String station, int pollutant, double value, int hourlyMask) {
-        int bit = hourlyMask & (1 << pollutant);
-        if (pollutant == 2 && bit != 0 && NowCast.hourly(id,pollutant)) mergeOzone(time,id,value);
+        int index = -1;
         for (int i = 0; i < samples.size(); i++) {
             Sample sample = samples.get(i);
-            if (sample.measuredAt == time && sample.stationId.equals(id)) {
-                if (sample.isHourly(pollutant) && bit == 0) return;
-                if (Double.compare(sample.values[pollutant], value) == 0 && (sample.hourlyMask & (1 << pollutant)) == bit) return;
-                derivedDirty = true;
-                double[] updated = sample.values.clone();
-                updated[pollutant] = value;
-                samples.set(i, new Sample(time, id, station, updated, sample.hourlyMask | bit));
-                return;
-            }
+            if (sample.measuredAt == time && sample.stationId.equals(id)) { index = i; break; }
+        }
+        mergeAt(index, time, id, station, pollutant, value, hourlyMask);
+    }
+
+    /** @param index position of this station/time report, or -1 when it is not stored yet.
+     *  @return the position of the report after merging. */
+    private int mergeAt(int index, long time, String id, String station, int pollutant, double value, int hourlyMask) {
+        int bit = hourlyMask & (1 << pollutant);
+        if (pollutant == 2 && bit != 0 && NowCast.hourly(id,pollutant)) mergeOzone(time,id,value);
+        if (index >= 0) {
+            Sample sample = samples.get(index);
+            if (sample.isHourly(pollutant) && bit == 0) return index;
+            if (Double.compare(sample.values[pollutant], value) == 0 && (sample.hourlyMask & (1 << pollutant)) == bit) return index;
+            derivedDirty = true;
+            double[] updated = sample.values.clone();
+            updated[pollutant] = value;
+            samples.set(index, new Sample(time, id, station, updated, sample.hourlyMask | bit));
+            return index;
         }
         double[] values = new double[LABELS.length];
         Arrays.fill(values, Double.NaN);
         values[pollutant] = value;
         derivedDirty = true;
         samples.add(new Sample(time, id, station, values, bit));
+        return samples.size() - 1;
     }
     private void mergeOzone(long time, String station, double value) {
         for (int i = 0; i < ozoneCalibration.size(); i++) {
@@ -180,6 +232,7 @@ public final class PollutantHistory {
         return true;
     }
     public void prune(long now) {
+        backups.removeIf(b -> b.reading.measuredAt<=0 || b.reading.measuredAt<now-WINDOW || b.reading.measuredAt>now);
         samples.removeIf(sample -> sample.measuredAt <= 0 || sample.measuredAt < now - WINDOW || sample.measuredAt > now);
         nowcasts.removeIf(sample -> sample.measuredAt() <= 0 || sample.measuredAt() < now - WINDOW || sample.measuredAt() > now);
         ozoneCalibration.removeIf(sample -> sample.measuredAt <= 0 || sample.measuredAt < now-OZONE_WINDOW || sample.measuredAt > now);
@@ -190,13 +243,16 @@ public final class PollutantHistory {
         prune(now);
         if (!derivedDirty) return;
         java.util.Map<String, Sample> anchors = new java.util.LinkedHashMap<>();
-        for (Sample sample : samples) {
+        List<Sample> actual=new ArrayList<>(samples);
+        for(var backup:backups) actual.add(backup.reading);
+        actual.sort(Comparator.comparingLong(Sample::measuredAt));
+        for (Sample sample : actual) {
             String key = sample.stationId + ":" + Math.floorDiv(sample.measuredAt, NowCast.HOUR);
             Sample existing = anchors.get(key);
             if (existing == null || sample.measuredAt > existing.measuredAt) anchors.put(key, sample);
         }
         for (Sample sample : anchors.values()) {
-            NowCast.Snapshot fresh = NowCast.calculate(samples, ozoneCalibration, nowcasts, sample.measuredAt, sample.stationId, sample.stationName);
+            NowCast.Snapshot fresh = NowCast.calculate(actual, ozoneCalibration, nowcasts, sample.measuredAt, sample.stationId, sample.stationName);
             int previous = -1;
             for (int i = 0; i < nowcasts.size(); i++) {
                 var old = nowcasts.get(i);
@@ -230,7 +286,7 @@ public final class PollutantHistory {
 
     public void write(OutputStream stream) throws IOException {
         DataOutputStream out = new DataOutputStream(stream);
-        out.writeInt(8);
+        out.writeInt(9);
         out.writeUTF(countryId); out.writeUTF(countryName); out.writeUTF(stationName); out.writeUTF(locationName);
         out.writeLong(startedAt);
         out.writeUTF(activeStationId); out.writeLong(activeStationSince); out.writeLong(lastRecoveryCompletedAt);
@@ -253,13 +309,20 @@ public final class PollutantHistory {
         for (var ozone : ozoneCalibration) { out.writeLong(ozone.measuredAt); out.writeUTF(ozone.stationId); out.writeDouble(ozone.value); }
         out.writeLong(lastOzoneRecoveryCompletedAt);
         out.writeLong(activeHistorySince);
+        out.writeInt(backups.size());
+        for(var backup:backups) {
+            var s=backup.reading;
+            out.writeUTF(backup.primaryStationId); out.writeLong(s.measuredAt);
+            out.writeUTF(s.stationId); out.writeUTF(s.stationName); out.writeInt(s.hourlyMask);
+            for(double value:s.values) out.writeDouble(value);
+        }
         out.flush();
     }
 
     public static PollutantHistory read(InputStream stream) throws IOException {
         DataInputStream in = new DataInputStream(stream);
         int version = in.readInt();
-        if (version < 1 || version > 8) throw new IOException("Unknown history version");
+        if (version < 1 || version > 9) throw new IOException("Unknown history version");
         PollutantHistory history = new PollutantHistory();
         history.countryId = in.readUTF(); history.countryName = in.readUTF();
         history.stationName = in.readUTF(); history.locationName = in.readUTF();
@@ -273,16 +336,24 @@ public final class PollutantHistory {
         }
         int count = in.readInt();
         if (count < 0 || count > 100000) throw new IOException("Invalid history length");
+        // Decoding runs on every history access: look reports up instead of scanning per value.
+        java.util.Map<String, Integer> positions = new java.util.HashMap<>();
         for (int i = 0; i < count; i++) {
             // Migrate v1 refresh snapshots using their stored report time, discarding receipt time.
             if (version == 1) in.readLong();
             long measured = in.readLong();
             String stationId = in.readUTF(), stationName = in.readUTF();
             int hourlyMask = version >= 7 ? in.readInt() : liveMask(stationId);
+            String key = measured + "|" + stationId;
+            Integer known = positions.get(key);
+            int position = known == null ? -1 : known;
             for (int p = 0; p < LABELS.length; p++) {
                 double value = in.readDouble();
-                if (measured > 0 && present(value)) history.merge(measured, stationId, stationName, p, value, hourlyMask);
+                if (measured > 0 && present(value)) {
+                    position = history.mergeAt(position, measured, stationId, stationName, p, value, hourlyMask);
+                }
             }
+            if (position >= 0) positions.put(key, position);
         }
         if (version >= 5) {
             int snapshots = in.readInt();
@@ -330,6 +401,17 @@ public final class PollutantHistory {
             // Older releases recovered only the most recent visit. Repair that gap once.
             history.lastRecoveryCompletedAt = 0;
         }
+        if(version>=9) {
+            int backups=in.readInt();
+            if(backups<0 || backups>100000) throw new IOException("Invalid backup history length");
+            for(int i=0;i<backups;i++) {
+                String primary=in.readUTF(); long time=in.readLong();
+                String source=in.readUTF(),name=in.readUTF(); int mask=in.readInt(); double[] values=new double[6];
+                for(int p=0;p<6;p++) values[p]=in.readDouble();
+                if(time>0 && source.startsWith("openaq:")) history.backups.add(new BackupSample(primary,new Sample(time,source,name,values,mask)));
+            }
+        }
         return history;
     }
 }
+

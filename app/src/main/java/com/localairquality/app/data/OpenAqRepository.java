@@ -17,7 +17,41 @@ final class OpenAqRepository {
     private static final String BASE = "https://api.openaq.org/v3";
     private static final List<String> POLLUTANTS = List.of("pm25", "pm10", "o3", "no2", "co", "so2");
 
+    private static final long LOCATIONS_TTL = 20L * 60 * 1000;
+    private static String listUrl;
+    private static JSONObject listResponse;
+    private static long listFetchedAt;
+
     private OpenAqRepository() {}
+
+    /** Live requests. Station metadata rarely changes, yet one refresh could download the same
+     *  nearby-station list twice (target lookup, then backup search) and the station again by id. */
+    static final HistoryRecoveryRepository.JsonFetcher LIVE = OpenAqRepository::liveGet;
+
+    private static JSONObject liveGet(String url, Map<String, String> headers) throws Exception {
+        boolean stationList = url.startsWith(BASE + "/locations?");
+        if (stationList) synchronized (OpenAqRepository.class) {
+            if (url.equals(listUrl) && Math.abs(System.currentTimeMillis() - listFetchedAt) < LOCATIONS_TTL) {
+                return listResponse;
+            }
+        }
+        JSONObject response = Network.getJsonFast(url, headers);
+        if (stationList) synchronized (OpenAqRepository.class) {
+            listUrl = url; listResponse = response; listFetchedAt = System.currentTimeMillis();
+        }
+        return response;
+    }
+
+    /** The remembered list entry for one station, in the same shape as /locations/{id}. */
+    private static synchronized JSONArray rememberedStation(String id) {
+        if (listResponse == null || Math.abs(System.currentTimeMillis() - listFetchedAt) >= LOCATIONS_TTL) return null;
+        JSONArray results = listResponse.optJSONArray("results");
+        for (int i = 0; results != null && i < results.length(); i++) {
+            JSONObject item = results.optJSONObject(i);
+            if (item != null && id.equals(Integer.toString(item.optInt("id", -1)))) return new JSONArray().put(item);
+        }
+        return null;
+    }
 
     static AirQualityReading fetch(
             double latitude,
@@ -25,21 +59,79 @@ final class OpenAqRepository {
             String locationName,
             String apiKey
     ) throws Exception {
+        return fetchAvailable(latitude,longitude,locationName,apiKey,"",System::currentTimeMillis,LIVE);
+    }
+
+    static AirQualityReading fetchAvailable(double latitude, double longitude, String locationName,
+            String apiKey, String excluded, long now, HistoryRecoveryRepository.JsonFetcher fetcher) throws Exception {
+        return fetchAvailable(latitude,longitude,locationName,apiKey,excluded,()->now,fetcher);
+    }
+    static AirQualityReading fetchAvailable(double latitude, double longitude, String locationName,
+            String apiKey, String excluded, java.util.function.LongSupplier clock, HistoryRecoveryRepository.JsonFetcher fetcher) throws Exception {
         Map<String, String> headers = Map.of("X-API-Key", apiKey);
         String coordinates = String.format(Locale.US, "%.4f,%.4f", latitude, longitude);
         String locationsUrl = BASE + "/locations?coordinates=" + coordinates
-                + "&radius=25000&limit=100&mobile=false";
-        JSONArray locations = Network.getJson(locationsUrl, headers).getJSONArray("results");
-        Station station = selectStation(locations, latitude, longitude);
-        if (station == null) {
-            throw new AirQualityRepository.NoStationException(
-                    "No current government monitor within 25 km");
+                + "&radius=25000&limit=1000&mobile=false&monitor=true";
+        long deadline=System.nanoTime()+20_000_000_000L;
+        JSONArray locations=new JSONArray();
+        for(int page=1; ; page++) {
+            if(System.nanoTime()>deadline) throw new AirQualityRepository.NoStationException("Backup search timed out");
+            JSONArray batch=fetcher.get(locationsUrl+"&page="+page,headers).getJSONArray("results");
+            for(int i=0;i<batch.length();i++) locations.put(batch.get(i));
+            if(batch.length()<1000) break;
         }
+        for(Station station : candidates(locations,latitude,longitude,clock.getAsLong())) {
+            if(("openaq:"+station.id).equals(excluded)) continue;
+            if(Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException("Refresh cancelled");
+            if(System.nanoTime()>deadline) break;
+            try {
+                var reading=BackupPolicy.freshValues(readStation(station,locationName,fetcher,headers,clock),clock.getAsLong());
+                if(reading.availablePollutants()>0) return reading;
+            } catch(AirQualityRepository.ApiKeyRequiredException | java.util.concurrent.CancellationException error) { throw error; }
+            catch(Exception unavailable) { /* Continue to the next nearest monitor. */ }
+        }
+        throw new AirQualityRepository.NoStationException("No fresh government monitor within 25 km");
+    }
 
-        JSONObject latestRoot = Network.getJson(
+    static AirQualityReading fetchKnown(AirQualityReading target, double latitude, double longitude,
+                                       String locationName, String key) throws Exception {
+        String id=target.stationId.substring("openaq:".length());
+        Map<String,String> headers=Map.of("X-API-Key",key);
+        JSONArray metadata=rememberedStation(id);
+        if(metadata==null) metadata=Network.getJsonFast(BASE+"/locations/"+id,headers).getJSONArray("results");
+        var candidates=candidates(metadata,latitude,longitude,System.currentTimeMillis());
+        if(candidates.isEmpty() || candidates.get(0).id!=Integer.parseInt(id))
+            throw new AirQualityRepository.NoStationException("Official monitor unavailable");
+        return readStation(candidates.get(0),locationName,Network::getJsonFast,headers,System::currentTimeMillis);
+    }
+
+    static AirQualityReading nearestTarget(double latitude,double longitude,String locationName,String key) throws Exception {
+        String coordinates=String.format(Locale.US,"%.4f,%.4f",latitude,longitude);
+        JSONArray locations=new JSONArray();
+        long deadline=System.nanoTime()+20_000_000_000L;
+        for(int page=1; ; page++) {
+            if(System.nanoTime()>deadline) throw new AirQualityRepository.NoStationException("Station search timed out");
+            JSONArray batch=LIVE.get(BASE+"/locations?coordinates="+coordinates
+                    +"&radius=25000&limit=1000&mobile=false&monitor=true&page="+page,Map.of("X-API-Key",key)).getJSONArray("results");
+            for(int i=0;i<batch.length();i++) locations.put(batch.get(i));
+            if(batch.length()<1000) break;
+        }
+        var choices=candidates(locations,latitude,longitude,System.currentTimeMillis());
+        if(choices.isEmpty()) throw new AirQualityRepository.NoStationException("No government monitor within 25 km");
+        Station s=choices.get(0); AirQualityReading r=new AirQualityReading();
+        r.stationId="openaq:"+s.id; r.stationName=s.name; r.sourceName=s.source;
+        r.countryCode=s.countryCode; r.countryName=s.country; r.latitude=s.latitude; r.longitude=s.longitude;
+        r.distanceKm=s.distanceKm; r.locationName=locationName;
+        return r;
+    }
+
+    private static AirQualityReading readStation(Station station, String locationName,
+            HistoryRecoveryRepository.JsonFetcher fetcher, Map<String,String> headers, java.util.function.LongSupplier clock) throws Exception {
+        JSONObject latestRoot = fetcher.get(
                 BASE + "/locations/" + station.id + "/latest?limit=100", headers);
         JSONArray latest = latestRoot.getJSONArray("results");
-        Map<String, Measurement> measurements = parseLatest(latest, station.sensors);
+        long now=clock.getAsLong();
+        Map<String, Measurement> measurements = parseLatest(latest, station.sensors,now);
         if (measurements.isEmpty()) {
             throw new AirQualityRepository.NoStationException("The nearest government monitor has no current data");
         }
@@ -77,14 +169,14 @@ final class OpenAqRepository {
                         .mapToInt(Map.Entry::getKey).min().orElse(0);
             }
         }
-        result.fetchedAtMillis = System.currentTimeMillis();
+        result.fetchedAtMillis = now;
         result.calculateIndices();
         return result;
     }
 
-    private static Station selectStation(JSONArray locations, double latitude, double longitude) throws Exception {
+    private static List<Station> candidates(JSONArray locations, double latitude, double longitude, long now) throws Exception {
         List<Station> candidates = new ArrayList<>();
-        long freshAfter = System.currentTimeMillis() - 48L * 60L * 60L * 1000L;
+        long freshAfter = now - 48L * 60L * 60L * 1000L;
         for (int i = 0; i < locations.length(); i++) {
             JSONObject item = locations.getJSONObject(i);
             if (item.optBoolean("isMobile", true) || !item.optBoolean("isMonitor", false)) continue;
@@ -112,9 +204,10 @@ final class OpenAqRepository {
                     NeaRepository.distanceKm(latitude, longitude, stationLat, stationLon),
                     sensors
             );
-            candidates.add(candidate);
+            if(candidate.distanceKm<=25) candidates.add(candidate);
         }
-        return candidates.stream().min(Comparator.comparingDouble(item -> item.distanceKm)).orElse(null);
+        candidates.sort(Comparator.comparingDouble(item -> item.distanceKm));
+        return candidates;
     }
 
     private static boolean isGovernmentMonitor(JSONArray instruments) {
@@ -154,7 +247,7 @@ final class OpenAqRepository {
         return result;
     }
 
-    private static Map<String, Measurement> parseLatest(JSONArray latest, Map<Integer, Parameter> sensors) {
+    private static Map<String, Measurement> parseLatest(JSONArray latest, Map<Integer, Parameter> sensors, long now) {
         Map<String, Measurement> result = new HashMap<>();
         for (int i = 0; i < latest.length(); i++) {
             JSONObject item = latest.optJSONObject(i);
@@ -163,6 +256,7 @@ final class OpenAqRepository {
             Parameter parameter = sensors.get(sensorId);
             if (parameter == null) continue;
             long timestamp = parseTime(item.optJSONObject("datetime"));
+            if(timestamp<=0 || timestamp>now) continue;
             double value = toMicrograms(item.optDouble("value", Double.NaN), parameter.units, parameter.name);
             if (!AirQualityReading.isPresent(value)) continue;
             Measurement existing = result.get(parameter.name);

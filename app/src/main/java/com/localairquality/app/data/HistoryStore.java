@@ -11,10 +11,22 @@ public final class HistoryStore {
     private static AtomicFile file(Context context) {
         return new AtomicFile(new File(context.getNoBackupFilesDir(), "pollutant-history.bin"));
     }
+    // Exact bytes of the file on disk. The screens, widget, notification and jobs load the history
+    // many times a minute; they decode this image instead of re-reading and re-writing the file.
+    private static byte[] image;
+
     public static synchronized PollutantHistory load(Context context) {
+        if (image == null) {
+            try {
+                image = file(context).readFully();
+            } catch (IOException missing) {
+                image = new byte[0];
+            }
+        }
         PollutantHistory history;
-        try (InputStream in = file(context).openRead()) {
-            history = PollutantHistory.read(in);
+        try {
+            history = image.length == 0 ? new PollutantHistory()
+                    : PollutantHistory.read(new ByteArrayInputStream(image));
         } catch (IOException error) {
             history = new PollutantHistory();
         }
@@ -22,15 +34,25 @@ public final class HistoryStore {
         save(context, history);
         return history;
     }
+    /** Stores a complete history in place of the current one. */
+    public static synchronized boolean replace(Context context, PollutantHistory history) {
+        return save(context, history);
+    }
     public static synchronized void record(Context context, AirQualityReading reading) {
         PollutantHistory history = load(context);
-        String country = reading.countryCode.isBlank() ? reading.countryName.trim().toLowerCase(java.util.Locale.ROOT)
-                : reading.countryCode.trim().toUpperCase(java.util.Locale.ROOT);
+        AirQualityReading primary=reading.isBackup()?reading.primary:reading;
+        String country = primary.countryCode.isBlank() ? primary.countryName.trim().toLowerCase(java.util.Locale.ROOT)
+                : primary.countryCode.trim().toUpperCase(java.util.Locale.ROOT);
         // Do not merge unidentifiable countries into a shared history.
         if (country.isEmpty()) return;
-        history.add(country, reading.countryName, reading.stationId, reading.stationName, reading.locationName,
-                reading.pollutantMeasuredAtMillis, new double[]{reading.pm25, reading.pm10, reading.o3,
-                        reading.no2, reading.co, reading.so2}, System.currentTimeMillis());
+        long now=System.currentTimeMillis();
+        history.add(country, primary.countryName, primary.stationId, primary.stationName, reading.locationName,
+                primary.pollutantMeasuredAtMillis, primary.values(), now);
+        if(reading.isBackup()) for(int p=0;p<6;p++) {
+            double[] values=new double[6]; java.util.Arrays.fill(values,Double.NaN); values[p]=reading.values()[p];
+            history.addBackup(primary.stationId,new PollutantHistory.Sample(reading.pollutantMeasuredAtMillis[p],
+                    reading.stationId,reading.stationName,values,0),now);
+        }
         save(context, history);
     }
     public static synchronized PollutantHistory.Recovery beginRecovery(Context context) {
@@ -48,14 +70,29 @@ public final class HistoryStore {
         PollutantHistory history = load(context);
         return history.completeRecovery(request) && save(context, history);
     }
+    public static synchronized boolean acceptBackupRecovery(Context context, PollutantHistory.Recovery request,
+                                                            String source, java.util.List<PollutantHistory.Sample> reports) {
+        PollutantHistory history=load(context);
+        return history.acceptBackupRecovery(request,source,reports,System.currentTimeMillis()) && save(context,history);
+    }
     private static boolean save(Context context, PollutantHistory history) {
         history.updateNowcasts(System.currentTimeMillis());
+        ByteArrayOutputStream encoded = new ByteArrayOutputStream(image == null ? 4096 : image.length + 512);
+        try {
+            history.write(encoded);
+        } catch (IOException error) {
+            return false;
+        }
+        byte[] bytes = encoded.toByteArray();
+        // Unchanged content needs no fsync; pruning alone rarely changes anything.
+        if (java.util.Arrays.equals(bytes, image)) return true;
         AtomicFile file = file(context);
         FileOutputStream out = null;
         try {
             out = file.startWrite();
-            history.write(out);
+            out.write(bytes);
             file.finishWrite(out);
+            image = bytes;
             return true;
         } catch (IOException error) {
             file.failWrite(out);
@@ -64,6 +101,7 @@ public final class HistoryStore {
         }
     }
 }
+
 
 
 

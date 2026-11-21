@@ -17,8 +17,13 @@ public final class NowCast {
             return hourlyNotSupplied() ? HOURLY_NOT_SUPPLIED : "Not enough hourly data";
         }
     }
-    public record Snapshot(long measuredAt, String stationId, String stationName, List<Input> inputs, double ozoneEstimate) {
+    /** backup is display provenance for a separate backup-source chart, not part of the calculation. */
+    public record Snapshot(long measuredAt, String stationId, String stationName, List<Input> inputs, double ozoneEstimate,
+                           boolean backup) {
         public Snapshot { inputs = List.copyOf(inputs); }
+        public Snapshot(long time, String station, String name, List<Input> inputs, double ozoneEstimate) {
+            this(time, station, name, inputs, ozoneEstimate, false);
+        }
         public Snapshot(long time, String station, String name, List<Input> inputs) {
             this(time, station, name, inputs, inputs.get(2).concentration());
         }

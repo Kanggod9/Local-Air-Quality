@@ -9,6 +9,8 @@ import com.localairquality.app.data.ReadingStore;
 import com.localairquality.app.notification.AirQualityNotification;
 import com.localairquality.app.widget.AirQualityWidgetProvider;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -17,6 +19,11 @@ public final class RefreshCoordinator {
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
     private static long generation;
     private static Future<?> current;
+    // Outcome of the newest request, and the callers of requests it replaced while they ran.
+    private static long settled;
+    private static AirQualityReading settledReading;
+    private static Exception settledFailure;
+    private static final List<Callback> followers = new ArrayList<>();
 
     private RefreshCoordinator() {}
 
@@ -71,44 +78,68 @@ public final class RefreshCoordinator {
         long request = ++generation;
         ReadingStore.saveLocation(appContext, latitude, longitude, locationName);
         current = EXECUTOR.submit(() -> {
-            AirQualityReading reading;
+            AirQualityReading reading = null;
+            Exception failure = null;
             try {
-                reading = AirQualityRepository.fetch(
-                        appContext, latitude, longitude, locationName);
+                reading = AirQualityRepository.fetch(appContext, latitude, longitude, locationName);
             } catch (Exception error) {
-                RefreshScheduler.scheduleRecovery(appContext);
-                if (callback != null) callback.onError(error);
-                return;
+                failure = error;
             }
+            List<Callback> listeners = new ArrayList<>();
             synchronized (RefreshCoordinator.class) {
-                // A previous location's slow response must not replace newer data.
-                if (request == generation && !Thread.currentThread().isInterrupted()) {
-                    ReadingStore.saveLocation(appContext, latitude, longitude, locationName);
-                    ReadingStore.saveReading(appContext, reading);
-                    try {
-                        AirQualityNotification.show(appContext, reading);
-                    } catch (RuntimeException error) {
-                        Log.w("LocalAirQuality", "Notification update failed", error);
-                    }
-                    try {
-                        AirQualityWidgetProvider.updateAll(appContext, reading);
-                    } catch (RuntimeException error) {
-                        Log.w("LocalAirQuality", "Widget update failed", error);
+                if (request != generation) {
+                    // A newer request replaced this one (for example the periodic job starting while
+                    // the screen was updating). Its caller receives the newer outcome, not an error.
+                    if (callback == null) return;
+                    if (settled == generation) {
+                        listeners.add(callback);
+                        reading = settledReading;
+                        failure = settledFailure;
+                    } else {
+                        followers.add(callback);
+                        return;
                     }
                 } else {
-                    if (callback != null) callback.onError(
-                            new java.util.concurrent.CancellationException("Refresh superseded"));
-                    return;
+                    if (failure == null && Thread.currentThread().isInterrupted()) {
+                        failure = new java.util.concurrent.CancellationException("Refresh cancelled");
+                    }
+                    if (failure == null) {
+                        // A previous location's slow response must not replace newer data.
+                        ReadingStore.saveLocation(appContext, latitude, longitude, locationName);
+                        ReadingStore.saveReading(appContext, reading);
+                        AirQualityReading reconciled = ReadingStore.loadReading(appContext);
+                        if (reconciled != null) reading = reconciled;
+                        try {
+                            AirQualityNotification.show(appContext, reading);
+                        } catch (RuntimeException error) {
+                            Log.w("LocalAirQuality", "Notification update failed", error);
+                        }
+                        try {
+                            AirQualityWidgetProvider.updateAll(appContext, reading);
+                        } catch (RuntimeException error) {
+                            Log.w("LocalAirQuality", "Widget update failed", error);
+                        }
+                    }
+                    settled = request;
+                    settledReading = failure == null ? reading : null;
+                    settledFailure = failure;
+                    if (callback != null) listeners.add(callback);
+                    listeners.addAll(followers);
+                    followers.clear();
+                    // Enqueue before notifying the Activity: closing it must not cancel recovery.
+                    RefreshScheduler.scheduleRecovery(appContext);
+                    if (failure == null) HistoryRecoveryCoordinator.recover(appContext);
                 }
             }
-            // Enqueue before notifying the Activity: closing it must not cancel recovery.
-            RefreshScheduler.scheduleRecovery(appContext);
-            HistoryRecoveryCoordinator.recover(appContext);
-            if (callback != null) callback.onSuccess(reading);
+            for (Callback listener : listeners) {
+                try {
+                    if (failure == null) listener.onSuccess(reading);
+                    else listener.onError(failure);
+                } catch (RuntimeException error) {
+                    Log.w("LocalAirQuality", "Refresh listener failed", error);
+                }
+            }
         });
         return current;
     }
 }
-
-
-

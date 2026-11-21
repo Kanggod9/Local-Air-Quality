@@ -42,6 +42,9 @@ public final class AlertGuidance {
         var eu = AqiCalculator.europeanAqi(reading);
         String current = "US AQI+: " + (reading.availablePollutants() == 0 ? "Unavailable" : us.aqi()+" · "+us.level())
                 + "\nEuropean AQI: " + (eu.band() == 0 ? "Unavailable" : eu.band()+" of 6 · "+eu.level());
+        if(reading.isBackup()) current += "\n\n"+reading.sourceLabel()+". "+reading.backupStatus
+                + ". This alert uses only this backup station’s recorded hours. When official reporting resumes,"
+                + " the alert is recalculated using only official readings from the last 24 hours.";
         current += "\n\nThe latest reading may be better or worse than the hours that triggered the alert."
                 + " The advice below uses the more cautious of the alert level and the latest reported categories."
                 + " Current main pollutants are not necessarily the pollutants that dominated earlier alert hours.";

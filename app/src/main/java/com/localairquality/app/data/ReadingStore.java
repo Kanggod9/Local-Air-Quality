@@ -16,9 +16,9 @@ public final class ReadingStore {
 
     public static void saveReading(Context context, AirQualityReading reading) {
         HistoryStore.record(context, reading);
-        attachHistory(context, reading);
+        AirQualityReading stored=attachHistory(context, reading);
         try {
-            prefs(context).edit().putString(KEY_READING, reading.toJson().toString()).apply();
+            prefs(context).edit().putString(KEY_READING, stored.toJson().toString()).apply();
         } catch (Exception ignored) {
             // A failed cache write must not hide a successful live result.
         }
@@ -34,18 +34,19 @@ public final class ReadingStore {
                 HistoryStore.load(context);
                 return null;
             }
-            attachHistory(context, reading);
-            return reading;
+            return attachHistory(context, reading);
         } catch (Exception ignored) {
             return null;
         }
     }
 
-    private static void attachHistory(Context context, AirQualityReading reading) {
+    private static AirQualityReading attachHistory(Context context, AirQualityReading reading) {
         PollutantHistory history = HistoryStore.load(context);
+        reading=BackupReconciliation.current(reading,history);
         reading.nowcast = history.latestNowcast(reading.stationId);
-        reading.alert = AirQualityAlert.calculate(history, reading.stationId, System.currentTimeMillis());
-        reading.otherStationRecords = history.otherStationRecords(reading.stationId, System.currentTimeMillis());
+        reading.alert = AirQualityAlert.calculate(history, reading, System.currentTimeMillis());
+        reading.otherStationRecords = history.otherStationRecords(reading.historyStationId(), System.currentTimeMillis());
+        return reading;
     }
 
     public static void saveLocation(Context context, double latitude, double longitude, String name) {
@@ -85,5 +86,6 @@ public final class ReadingStore {
 
     public record SavedLocation(double latitude, double longitude, String name) {}
 }
+
 
 

@@ -49,6 +49,14 @@ public final class AirQualityAlert {
                 HistorySeries.points(history, HistorySeries.Metric.EUROPEAN_AQI), now);
     }
 
+    public static Result calculate(PollutantHistory history, AirQualityReading current, long now) {
+        if (current == null || current.historyStationId().isBlank()
+                || !current.historyStationId().equals(history.activeStationId)) return NONE;
+        var source = HistorySeries.chartSource(history,current);
+        return fromPoints(HistorySeries.chartPoints(history,HistorySeries.Metric.US_AQI,source),
+                HistorySeries.chartPoints(history,HistorySeries.Metric.EUROPEAN_AQI,source),now);
+    }
+
     static Result fromPoints(List<HistorySeries.Point> us, List<HistorySeries.Point> european, long now) {
         Map<Long, Double> usHours = hours(us, now), euHours = hours(european, now);
         long latest = Math.max(latestHour(usHours), latestHour(euHours));

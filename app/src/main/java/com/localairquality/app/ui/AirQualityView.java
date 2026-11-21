@@ -1,38 +1,63 @@
 package com.localairquality.app.ui;
 
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.os.Bundle;
 import android.os.SystemClock;
 import android.text.Layout;
-import android.text.StaticLayout;
-import android.text.TextPaint;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
+import android.text.StaticLayout;
+import android.text.TextPaint;
+import android.text.TextUtils;
 import android.text.style.StyleSpan;
+import android.util.TypedValue;
+import android.view.InputDevice;
 import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
+import android.view.ViewConfiguration;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.animation.DecelerateInterpolator;
+import android.widget.OverScroller;
 
 import com.localairquality.app.data.AirQualityReading;
 import com.localairquality.app.data.AqiCalculator;
 import com.localairquality.app.data.HealthAdvice;
 import com.localairquality.app.data.HistorySeries;
+import com.localairquality.app.data.PollutantHistory;
 
 import java.text.DateFormat;
 import java.util.Date;
 import java.util.Locale;
 
+/**
+ * The home screen, drawn on one hardware-accelerated canvas. Text layouts are cached between
+ * frames, so scrolling, the gauge animation and the refresh spinner allocate nothing.
+ */
 public final class AirQualityView extends View {
-    private static final int BACKGROUND = Color.rgb(244, 247, 250);
-    private static final int INK = Color.rgb(31, 40, 52);
-    private static final int MUTED = Color.rgb(91, 103, 119);
-    private static final int TILE = Color.rgb(242, 245, 247);
-    private static final Typeface NORMAL_FONT = Typeface.create("sans", Typeface.NORMAL);
-    private static final Typeface BOLD_FONT = Typeface.create("sans", Typeface.BOLD);
+    private static final Typeface NORMAL_FONT = Typeface.create("sans-serif", Typeface.NORMAL);
+    private static final Typeface BOLD_FONT = Typeface.create("sans-serif-medium", Typeface.BOLD);
+    private static final String[] NAMES = {"Fine particles", "Coarse particles", "Ozone",
+            "Nitrogen dioxide", "Carbon monoxide", "Sulphur dioxide"};
+    private static final String[] SYMBOLS = {"PM2.5", "PM10", "O₃", "NO₂", "CO", "SO₂"};
+    private static final String[] HISTORY_LABELS = {"US AQI+", "European AQI", "PM2.5", "PM10", "O3", "NO2",
+            "CO", "SO2", "US NowCast"};
+    private static final int[] US_BOUNDS = {0, 50, 100, 150, 200, 300, 500};
+    private static final int[] US_SAMPLES = {0, 51, 101, 151, 201, 301};
+
+    // Tap targets, in content coordinates.
+    private static final int T_REFRESH = 0, T_ALERT = 1, T_US = 2, T_EU = 3, T_NOWCAST = 4,
+            T_POLLUTANT = 5, T_BACKUP = 11, T_ACTION = 12, TARGETS = 13;
+    // Cached text slots.
+    private static final int S_TITLE = 0, S_SUBTITLE = 1, S_NOTICE = 2, S_ALERT = 3, S_US_LEVEL = 4,
+            S_EU_LEVEL = 5, S_NOW_LEVEL = 6, S_NOW_DETAIL = 7, S_STATION = 8, S_SOURCE = 9,
+            S_REMINDER = 10, S_STATE = 11, S_TILE_NAME = 12, S_TILE_LEVEL = 18, SLOTS = 24;
 
     public enum Action { REQUEST_LOCATION, ENABLE_LOCATION, ENTER_API_KEY, RETRY }
 
@@ -43,44 +68,64 @@ public final class AirQualityView extends View {
         void onActionRequested(Action action);
     }
 
+    private final Palette palette;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final RectF updateBounds = new RectF();
-    private final RectF actionBounds = new RectF();
-    private final RectF alertBounds = new RectF();
-    private final RectF usBounds = new RectF(), euBounds = new RectF(), nowcastBounds = new RectF();
-    private final RectF[] pollutantBounds = {new RectF(), new RectF(), new RectF(), new RectF(), new RectF(), new RectF()};
-    private final float density;
-    private final float scaledDensity;
+    private final TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint.FontMetrics metrics = new Paint.FontMetrics();
+    private final Path path = new Path();
+    private final RectF oval = new RectF();
+    private final RectF[] targets = new RectF[TARGETS];
+    private final float[] targetRadius = new float[TARGETS];
+    private final StaticLayout[] layouts = new StaticLayout[SLOTS];
+    private final CharSequence[] slotText = new CharSequence[SLOTS];
+    private final String[] slotFitted = new String[SLOTS];
+    private final float[] slotWidth = new float[SLOTS];
+    private final float density, scaled, fontScale;
+    private final int touchSlop, minFling, maxFling;
+    private final OverScroller scroller;
+    private VelocityTracker velocity;
+    private ValueAnimator gaugeAnimator;
+
     private Listener listener;
     private AirQualityReading reading;
     private boolean refreshing;
-    private String stateMessage;
-    private String actionLabel;
+    private String stateMessage, actionLabel;
     private Action action;
-    private float scrollOffset;
-    private float contentHeight;
-    private float downY;
-    private float lastY;
-    private float pullDistance;
-    private boolean moved;
-    private final TextPaint advicePaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private int insetLeft, insetTop, insetRight, insetBottom;
+    private float scrollOffset, contentHeight, downX, downY, lastY, pullDistance, gauge = 1f;
+    private boolean dragging;
+    private int pressed = -1, shownAqi = -1;
+
+    // Values derived once per reading rather than once per frame.
+    private String subtitle = "", measuredTime = "—", nowcastDetail = "", distance = "", stationNote = "";
+    private final String[] tileValue = new String[6], tileUnit = new String[6], tileLevel = new String[6];
+    private final int[] tileColor = new int[6];
     private StaticLayout adviceLayout;
     private HealthAdvice.Advice advice;
     private long adviceCheckedAt;
     private int adviceWidth;
-    private String measuredTime = "—";
 
     public AirQualityView(Context context) {
         super(context);
+        palette = Palette.of(context);
         density = getResources().getDisplayMetrics().density;
-        scaledDensity = getResources().getDisplayMetrics().scaledDensity;
-        setBackgroundColor(BACKGROUND);
+        scaled = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 1, getResources().getDisplayMetrics());
+        fontScale = getResources().getConfiguration().fontScale;
+        ViewConfiguration configuration = ViewConfiguration.get(context);
+        touchSlop = configuration.getScaledTouchSlop();
+        minFling = configuration.getScaledMinimumFlingVelocity();
+        maxFling = configuration.getScaledMaximumFlingVelocity();
+        scroller = new OverScroller(context);
+        for (int i = 0; i < TARGETS; i++) targets[i] = new RectF();
+        setBackgroundColor(palette.background);
         setFocusable(true);
         setContentDescription("Local Air Quality");
-        setLayerType(LAYER_TYPE_SOFTWARE, null);
-        advicePaint.setColor(INK);
-        advicePaint.setTypeface(NORMAL_FONT);
-        advicePaint.setTextSize(15 * scaledDensity);
+        setOnApplyWindowInsetsListener((view, insets) -> {
+            int[] bars = SystemBars.insets(insets);
+            insetLeft = bars[0]; insetTop = bars[1]; insetRight = bars[2]; insetBottom = bars[3];
+            invalidate();
+            return insets;
+        });
     }
 
     public void setListener(Listener listener) {
@@ -90,15 +135,40 @@ public final class AirQualityView extends View {
     public void showReading(AirQualityReading reading, boolean refreshing) {
         this.reading = reading;
         this.refreshing = refreshing;
-        this.stateMessage = null;
-        this.actionLabel = null;
-        this.action = null;
+        stateMessage = null;
+        actionLabel = null;
+        action = null;
         measuredTime = formatDateTime(reading.measuredAtMillis);
+        // A city-state's place name already is its country ("Singapore · Singapore").
+        subtitle = reading.countryName.isBlank() || reading.countryName.equalsIgnoreCase(reading.locationName)
+                ? measuredTime : reading.countryName + " · " + measuredTime;
+        var nowcast = reading.nowcast;
+        nowcastDetail = nowcast == null || nowcast.aqi() < 0 ? "Waiting for enough hourly data" : nowcast.status() + "\n"
+                + nowcast.pollutant() + " · "
+                + AirQualityReading.formatConcentration(nowcast.pollutant(), nowcast.concentration());
+        distance = String.format(Locale.getDefault(), "%.1f km away", reading.distanceKm);
+        String reminder = reading.otherStationRecords.message();
+        String backup = reading.backupNotice();
+        stationNote = backup.isEmpty() ? reminder : backup + (reminder.isEmpty() ? "" : "\n" + reminder);
+        double[] values = reading.values();
+        for (int p = 0; p < 6; p++) {
+            String label = PollutantHistory.LABELS[p];
+            String formatted = AirQualityReading.formatConcentration(label, values[p]);
+            int space = formatted.indexOf(' ');
+            tileValue[p] = space < 0 ? formatted : formatted.substring(0, space);
+            tileUnit[p] = space < 0 ? "" : formatted.substring(space + 1);
+            HistorySeries.Metric metric = HistorySeries.Metric.forLabel(label);
+            int band = HistorySeries.band(metric, values[p]);
+            tileLevel[p] = band == 0 ? "No data" : HistorySeries.level(metric, band);
+            tileColor[p] = HistorySeries.color(metric, band);
+        }
         adviceLayout = null;
         adviceCheckedAt = 0;
-        setContentDescription(reading.locationName + ", US AQI " + reading.usAqi + ", "
-                + reading.usLevel + ", European AQI " + reading.euBand + ", " + reading.euLevel + nowcastDescription()
-                + ". " + reading.alert.message() + ". " + reading.otherStationRecords.message());
+        describe(null);
+        if (reading.usAqi != shownAqi) {
+            shownAqi = reading.usAqi;
+            animateGauge();
+        }
         invalidate();
     }
 
@@ -126,7 +196,9 @@ public final class AirQualityView extends View {
 
     public void clearReading() {
         reading = null;
+        shownAqi = -1;
         scrollOffset = 0;
+        scroller.forceFinished(true);
         invalidate();
     }
 
@@ -134,282 +206,329 @@ public final class AirQualityView extends View {
         return stateMessage != null && !refreshing && action != Action.ENTER_API_KEY;
     }
 
+    private void animateGauge() {
+        if (gaugeAnimator != null) gaugeAnimator.cancel();
+        gaugeAnimator = ValueAnimator.ofFloat(0f, 1f);
+        gaugeAnimator.setDuration(750);
+        gaugeAnimator.setInterpolator(new DecelerateInterpolator(1.6f));
+        gaugeAnimator.addUpdateListener(animation -> {
+            gauge = (float) animation.getAnimatedValue();
+            invalidate();
+        });
+        gaugeAnimator.start();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        if (gaugeAnimator != null) gaugeAnimator.cancel();
+        if (velocity != null) { velocity.recycle(); velocity = null; }
+        super.onDetachedFromWindow();
+    }
+
+    // ---------------------------------------------------------------- drawing
+
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        for (RectF bounds : pollutantBounds) bounds.setEmpty();
-        actionBounds.setEmpty();
-        alertBounds.setEmpty();
-        usBounds.setEmpty(); euBounds.setEmpty(); nowcastBounds.setEmpty();
-        updateBounds.setEmpty();
-        canvas.drawColor(BACKGROUND);
-        float translatedPull = scrollOffset <= 0 ? pullDistance * 0.45f : 0;
+        for (RectF target : targets) target.setEmpty();
+        float left = insetLeft + dp(16), right = getWidth() - insetRight - dp(16);
+        float limit = dp(620);
+        if (right - left > limit) {
+            float centre = (left + right) / 2;
+            left = centre - limit / 2;
+            right = centre + limit / 2;
+        }
+        float width = right - left;
+        float top = insetTop + dp(14);
+
         canvas.save();
-        canvas.translate(0, -scrollOffset + translatedPull);
-        if (reading != null) drawContent(canvas);
-        else drawEmptyHeader(canvas);
+        canvas.translate(0, -scrollOffset + (scrollOffset <= 0 ? pullDistance * 0.5f : 0));
+        float bottom = reading != null ? drawContent(canvas, left, top, width) : drawEmpty(canvas, left, top, width);
+        if (pressed >= 0 && !targets[pressed].isEmpty()) {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Palette.alpha(palette.ink, palette.dark ? 34 : 22));
+            canvas.drawRoundRect(targets[pressed], targetRadius[pressed], targetRadius[pressed], paint);
+        }
         canvas.restore();
 
-        if (reading == null || stateMessage != null) drawStateOverlay(canvas);
-        if (refreshing || pullDistance > dp(8)) drawRefreshIndicator(canvas);
-        if (refreshing) postInvalidateDelayed(80);
-    }
-
-    private void drawContent(Canvas canvas) {
-        float pad = dp(18);
-        float width = getWidth() - pad * 2;
-        float y = dp(22);
-
-        drawLocationHeader(canvas, pad, y, width);
-        y += dp(108);
-        y = drawAlert(canvas, pad, y, width);
-
-        drawUsCard(canvas, pad, y, width, dp(218));
-        y += dp(234);
-        drawEuCard(canvas, pad, y, width, dp(132));
-        y += dp(148);
-
-        var nowcast = reading.nowcast;
-        String detail = nowcast == null ? "Not enough hourly data" : nowcast.status() + "\n"
-                + nowcast.pollutant() + " · " + AirQualityReading.formatConcentration(nowcast.pollutant(), nowcast.concentration())
-                + "\n" + formatDateTime(nowcast.measuredAt());
-        y = drawIndexCard(canvas, pad, y, width, "US AQI · NowCast", nowcast == null ? "—" : nowcast.score(),
-                nowcast == null ? "Not enough data" : nowcast.level(),
-                nowcast == null || nowcast.aqi() < 0 ? AqiCalculator.euColor(0) : AqiCalculator.usColor(nowcast.aqi()),
-                detail, nowcastBounds);
-        y += dp(16);
-
-        y = drawStationCard(canvas, pad, y, width) + dp(18);
-
-        y = drawPollutants(canvas, pad, y, width);
-        y = drawHealthAdvice(canvas, pad, y + dp(18), width);
-        y += dp(24);
-
-        text(canvas, "Updated " + measuredTime, pad, y,
-                13, MUTED, Paint.Align.LEFT, Typeface.NORMAL);
-        y += dp(38);
-        contentHeight = y;
-    }
-
-    private float drawAlert(Canvas canvas, float x, float y, float width) {
-        if (!reading.alert.active()) return y;
-        TextPaint label = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-        label.setColor(Color.WHITE); label.setTypeface(BOLD_FONT); label.setTextSize(15 * scaledDensity);
-        String message = reading.alert.message();
-        StaticLayout layout = StaticLayout.Builder.obtain(message, 0, message.length(), label,
-                Math.max(1, (int)(width-dp(110)))).setIncludePad(false).setLineSpacing(dp(2),1).build();
-        float height = Math.max(dp(80), layout.getHeight()+dp(32));
-        roundedShadow(canvas, x, y, x+width, y+height, dp(20), reading.alert.level().color);
-        alertBounds.set(x, y, x+width, y+height);
-        AlertSymbols.draw(getContext(), canvas, reading.alert.level(), x+dp(16), y+(height-dp(44))/2, dp(44));
-        canvas.save(); canvas.translate(x+dp(72), y+(height-layout.getHeight())/2);
-        layout.draw(canvas); canvas.restore();
-        text(canvas, "›", x+width-dp(18), y+height/2+dp(7), 24, Color.WHITE, Paint.Align.RIGHT, Typeface.NORMAL);
-        return y+height+dp(16);
-    }
-
-    private float drawIndexCard(Canvas canvas, float x, float y, float width, String title, String score,
-                                String level, int color, String detail, RectF bounds) {
-        TextPaint labelPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-        labelPaint.setTypeface(BOLD_FONT); labelPaint.setColor(INK); labelPaint.setTextSize(17 * scaledDensity);
-        StaticLayout levelLayout = StaticLayout.Builder.obtain(level, 0, level.length(), labelPaint,
-                Math.max(1, (int)(width - dp(115)))).setIncludePad(false).build();
-        float body = Math.max(dp(38), levelLayout.getHeight());
-        TextPaint detailPaint = new TextPaint(labelPaint); detailPaint.setTypeface(NORMAL_FONT); detailPaint.setTextSize(12 * scaledDensity);
-        StaticLayout detailLayout = StaticLayout.Builder.obtain(detail, 0, detail.length(), detailPaint,
-                Math.max(1, (int)(width - dp(32)))).setIncludePad(false).setLineSpacing(dp(3), 1).build();
-        float height = dp(58) + body + (detail.isEmpty() ? 0 : detailLayout.getHeight() + dp(10));
-        bounds.set(x,y,x+width,y+height);
-        rounded(canvas,x,y,x+width,y+height,dp(22),color);
-        // Use a light neutral label panel for legible text even on dark hazardous colours.
-        rounded(canvas,x+dp(8),y+dp(8),x+width-dp(8),y+height-dp(8),dp(16),0xEFFFFFFF);
-        text(canvas,title,x+dp(16),y+dp(30),14,INK,Paint.Align.LEFT,Typeface.BOLD);
-        text(canvas,"›",x+width-dp(17),y+dp(30),18,INK,Paint.Align.RIGHT,Typeface.NORMAL);
-        text(canvas,score,x+dp(16),y+dp(67),29,INK,Paint.Align.LEFT,Typeface.BOLD);
-        canvas.save(); canvas.translate(x+dp(99),y+dp(44)); levelLayout.draw(canvas); canvas.restore();
-        if (!detail.isEmpty()) {
-            canvas.save(); canvas.translate(x+dp(16),y+dp(48)+body); detailLayout.draw(canvas); canvas.restore();
+        contentHeight = reading != null ? bottom + insetBottom + dp(24) : getHeight();
+        float maxScroll = maxScroll();
+        if (scrollOffset > maxScroll) {
+            scrollOffset = maxScroll;
+            invalidate();
         }
-        return y+height;
-    }
-
-    private void drawLocationHeader(Canvas canvas, float x, float y, float width) {
-        drawLocationArrow(canvas, x + dp(15), y + dp(22));
-        String title = reading.locationName;
-        if (title.length() > 28) title = title.substring(0, 27) + "…";
-        text(canvas, title, x + dp(43), y + dp(23), 27, INK,
-                Paint.Align.LEFT, Typeface.BOLD);
-        text(canvas, reading.countryName, x + dp(43), y + dp(51), 16, MUTED,
-                Paint.Align.LEFT, Typeface.NORMAL);
-        text(canvas, measuredTime, x + dp(43), y + dp(77),
-                14, MUTED, Paint.Align.LEFT, Typeface.NORMAL);
-
-        updateBounds.set(x + width - dp(50), y, x + width, y + dp(50));
-        paint.setColor(Color.WHITE);
-        paint.setShadowLayer(dp(7), 0, dp(2), 0x18000000);
-        canvas.drawCircle(updateBounds.centerX(), updateBounds.centerY(), dp(23), paint);
-        paint.clearShadowLayer();
-        drawRefreshGlyph(canvas, updateBounds.centerX(), updateBounds.centerY(), dp(11), MUTED,
-                refreshing ? (SystemClock.uptimeMillis() % 1000) * 0.36f : 0);
-    }
-
-    private void drawUsCard(Canvas canvas, float x, float y, float width, float height) {
-        usBounds.set(x, y, x + width, y + height);
-        int color = AqiCalculator.usColor(reading.usAqi);
-        rounded(canvas, x, y, x + width, y + height, dp(24), color);
-        int foreground = reading.usAqi >= 151 ? Color.WHITE : INK;
-        text(canvas, "›", x + width - dp(18), y + dp(30), 20, foreground, Paint.Align.RIGHT, Typeface.NORMAL);
-        boolean compact = width < dp(330);
-        float scoreRight = x + dp(compact ? 104 : 119);
-        float scoreCenter = (x + dp(18) + scoreRight) / 2f;
-
-        rounded(canvas, x + dp(18), y + dp(18), scoreRight, y + dp(127),
-                dp(18), darken(color, 0.90f));
-        text(canvas, Integer.toString(reading.usAqi), scoreCenter, y + dp(71),
-                compact ? 35 : 38, foreground, Paint.Align.CENTER, Typeface.BOLD);
-        text(canvas, "US AQI+", scoreCenter, y + dp(103),
-                compact ? 12 : 14, foreground, Paint.Align.CENTER, Typeface.NORMAL);
-
-        float levelX = x + dp(compact ? 118 : 140);
-        drawFittedLevel(canvas, reading.usLevel, levelX, y+dp(28), x+width-dp(18)-levelX,
-                dp(94), "Unhealthy for Sensitive Groups".equals(reading.usLevel) ? (compact?19:24) : 27, foreground);
-
-        paint.setColor(withAlpha(foreground, 50));
-        paint.setStrokeWidth(dp(1));
-        canvas.drawLine(x + dp(18), y + dp(148), x + width - dp(18), y + dp(148), paint);
-        text(canvas, "Main pollutant", x + dp(20), y + dp(174), 13, foreground,
-                Paint.Align.LEFT, Typeface.NORMAL);
-        text(canvas, reading.mainPollutant, x + dp(20), y + dp(204), 19, foreground,
-                Paint.Align.LEFT, Typeface.BOLD);
-        text(canvas, reading.pollutantValue(reading.mainPollutant), x + width - dp(20),
-                y + dp(204), compact ? 15 : 18, foreground, Paint.Align.RIGHT, Typeface.BOLD);
-    }
-
-    private void drawEuCard(Canvas canvas, float x, float y, float width, float height) {
-        euBounds.set(x, y, x + width, y + height);
-        int color = AqiCalculator.euColor(reading.euBand);
-        rounded(canvas, x, y, x + width, y + height, dp(22), color);
-        int foreground = reading.euBand >= 4 ? Color.WHITE : INK;
-        text(canvas, "›", x + width - dp(18), y + dp(30), 20, foreground, Paint.Align.RIGHT, Typeface.NORMAL);
-        rounded(canvas, x + dp(16), y + dp(15), x + dp(92), y + height - dp(15),
-                dp(16), darken(color, 0.90f));
-        text(canvas, Integer.toString(reading.euBand), x + dp(54), y + dp(62), 33,
-                foreground, Paint.Align.CENTER, Typeface.BOLD);
-        text(canvas, "of 6", x + dp(54), y + dp(88), 13,
-                foreground, Paint.Align.CENTER, Typeface.NORMAL);
-        drawFittedLevel(canvas, reading.euLevel, x+dp(112), y+dp(25), width-dp(130), dp(46), 26, foreground);
-        text(canvas, "European AQI", x + dp(112), y + dp(84), 15,
-                foreground, Paint.Align.LEFT, Typeface.NORMAL);
-        int count = reading.availablePollutants() - (AirQualityReading.isPresent(reading.co) ? 1 : 0);
-        if (count < 5) text(canvas, "Partial · " + count + "/5 pollutants", x + dp(112), y + dp(109), 12,
-                foreground, Paint.Align.LEFT, Typeface.NORMAL);
-    }
-
-    private void drawFittedLevel(Canvas canvas, String value, float x, float y, float width,
-                                 float height, float maxSize, int color) {
-        TextPaint label = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-        label.setColor(color); label.setTypeface(BOLD_FONT);
-        StaticLayout layout;
-        float widestWord;
-        float size=maxSize;
-        do {
-            label.setTextSize(size*scaledDensity);
-            widestWord=0;
-            for(String word:value.split("\\s+")) widestWord=Math.max(widestWord,label.measureText(word));
-            layout=StaticLayout.Builder.obtain(value,0,value.length(),label,Math.max(1,(int)width))
-                    .setIncludePad(false).build();
-            size--;
-        } while((layout.getHeight()>height || widestWord>width) && size>=12);
-        canvas.save(); canvas.translate(x,y+Math.max(0,(height-layout.getHeight())/2));
-        layout.draw(canvas); canvas.restore();
-    }
-
-    private float drawStationCard(Canvas canvas, float x, float y, float width) {
-        String reminder = reading.otherStationRecords.message();
-        StaticLayout reminderLayout = null;
-        if (!reminder.isEmpty()) {
-            TextPaint reminderPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-            reminderPaint.setTypeface(NORMAL_FONT); reminderPaint.setColor(MUTED);
-            reminderPaint.setTextSize(12 * scaledDensity);
-            reminderLayout = StaticLayout.Builder.obtain(reminder, 0, reminder.length(), reminderPaint,
-                    Math.max(1, (int)(width - dp(36)))).setIncludePad(false).build();
+        if (scrollOffset > 0 && insetTop > 0) {
+            // Keep scrolled content from showing through the status bar icons.
+            fill(palette.background);
+            canvas.drawRect(0, 0, getWidth(), insetTop, paint);
         }
-        float height = dp(104) + (reminderLayout == null ? 0 : reminderLayout.getHeight() + dp(16));
-        roundedShadow(canvas, x, y, x + width, y + height, dp(20), Color.WHITE);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x1A177A68);
-        canvas.drawCircle(x + dp(39), y + dp(51), dp(24), paint);
-        drawStationGlyph(canvas, x + dp(39), y + dp(51));
-        String station = reading.stationName;
-        if (station.length() > 26) station = station.substring(0, 25) + "…";
-        text(canvas, station, x + dp(78), y + dp(38), 16,
-                INK, Paint.Align.LEFT, Typeface.BOLD);
-        String source = reading.sourceName;
-        if (source.length() > 28) source = source.substring(0, 27) + "…";
-        text(canvas, source, x + dp(78), y + dp(65), 12,
-                MUTED, Paint.Align.LEFT, Typeface.NORMAL);
-        text(canvas, String.format(Locale.getDefault(), "%.1f km", reading.distanceKm),
-                x + width - dp(18), y + dp(88), 12, MUTED, Paint.Align.RIGHT, Typeface.NORMAL);
-        if (reminderLayout != null) {
-            canvas.save(); canvas.translate(x + dp(18), y + dp(104));
-            reminderLayout.draw(canvas); canvas.restore();
+        if (pullDistance > dp(6) || (refreshing && reading != null && scrollOffset > dp(40))) drawPullIndicator(canvas);
+        if (refreshing) postInvalidateOnAnimation();
+    }
+
+    private float drawContent(Canvas canvas, float x, float y, float width) {
+        y = drawHeader(canvas, x, y, width, reading.locationName, subtitle) + dp(18);
+        if (stateMessage != null) y = drawNotice(canvas, x, y, width) + dp(12);
+        y = drawAlert(canvas, x, y, width);
+        y = drawUsCard(canvas, x, y, width) + dp(12);
+        y = drawIndexRow(canvas, x, y, width) + dp(26);
+        y = drawPollutants(canvas, x, y, width) + dp(14);
+        y = drawHealthAdvice(canvas, x, y, width) + dp(12);
+        y = drawStationCard(canvas, x, y, width) + dp(18);
+        return top(canvas, "Station report · " + measuredTime, x + dp(4), y, 12.5f, palette.muted, false);
+    }
+
+    private float drawHeader(Canvas canvas, float x, float y, float width, String title, String detail) {
+        float button = dp(44);
+        float textWidth = width - button - dp(12);
+        float start = y;
+        y = top(canvas, fit(S_TITLE, title, textWidth, 26, true), x + dp(2), y, 26, palette.ink, true);
+        y = top(canvas, fit(S_SUBTITLE, detail, textWidth, 14, false), x + dp(2), y + dp(2), 14, palette.muted, false);
+
+        float cx = x + width - button / 2, cy = start + Math.max(button, y - start) / 2;
+        target(T_REFRESH, cx - dp(24), cy - dp(24), cx + dp(24), cy + dp(24), dp(24));
+        fill(palette.surface);
+        canvas.drawCircle(cx, cy, button / 2, paint);
+        stroke(palette.outline, dp(1));
+        canvas.drawCircle(cx, cy, button / 2, paint);
+        drawRefreshGlyph(canvas, cx, cy, dp(9.5f), refreshing ? palette.accent : palette.muted,
+                refreshing ? (SystemClock.uptimeMillis() % 900) * 0.4f : 0);
+        return y;
+    }
+
+    private float drawNotice(Canvas canvas, float x, float y, float width) {
+        float pad = dp(16);
+        StaticLayout message = block(S_NOTICE, stateMessage, 15, true, palette.ink,
+                width - pad * 2, Layout.Alignment.ALIGN_NORMAL, 4);
+        float height = pad + message.getHeight() + (actionLabel == null ? 0 : dp(12) + dp(40)) + pad;
+        card(canvas, x, y, width, height, dp(18), palette.surface, true);
+        draw(canvas, message, x + pad, y + pad);
+        if (actionLabel != null) {
+            float buttonTop = y + pad + message.getHeight() + dp(12);
+            drawButton(canvas, x + pad, buttonTop, Math.min(width - pad * 2, measure(actionLabel, 15, true) + dp(40)));
         }
         return y + height;
     }
 
-    private float drawPollutants(Canvas canvas, float x, float y, float width) {
-        float gap = dp(10);
-        float containerHeight = dp(455);
-        roundedShadow(canvas, x, y, x + width, y + containerHeight, dp(22), Color.WHITE);
-        text(canvas, "Air pollutants", x + dp(20), y + dp(39), 20,
-                INK, Paint.Align.LEFT, Typeface.BOLD);
-        float tileWidth = (width - dp(50)) / 2;
-        float tileHeight = dp(116);
-        String[] labels = {"PM2.5", "PM10", "O3", "NO2", "CO", "SO2"};
-        String[] names = {"Fine particles", "Coarse particles", "Ozone",
-                "Nitrogen dioxide", "Carbon monoxide", "Sulphur dioxide"};
-        for (int i = 0; i < labels.length; i++) {
-            int column = i % 2;
-            int row = i / 2;
-            float left = x + dp(20) + column * (tileWidth + gap);
-            float top = y + dp(59) + row * (tileHeight + gap);
-            pollutantBounds[i].set(left, top, left + tileWidth, top + tileHeight);
-            drawPollutantTile(canvas, left, top, tileWidth, tileHeight, labels[i], names[i]);
+    private void drawButton(Canvas canvas, float x, float y, float width) {
+        target(T_ACTION, x, y - dp(4), x + width, y + dp(44), dp(22));
+        fill(palette.accent);
+        canvas.drawRoundRect(x, y, x + width, y + dp(40), dp(20), dp(20), paint);
+        centred(canvas, actionLabel, x + width / 2, y + dp(20), 15, palette.onAccent, true);
+    }
+
+    private float drawAlert(Canvas canvas, float x, float y, float width) {
+        if (!reading.alert.active()) return y;
+        StaticLayout message = block(S_ALERT, reading.alert.message(), 15, true, 0xFFFFFFFF,
+                width - dp(106), Layout.Alignment.ALIGN_NORMAL, 6);
+        float height = Math.max(dp(76), message.getHeight() + dp(32));
+        target(T_ALERT, x, y, x + width, y + height, dp(20));
+        fill(reading.alert.level().color);
+        canvas.drawRoundRect(x, y, x + width, y + height, dp(20), dp(20), paint);
+        AlertSymbols.draw(getContext(), canvas, reading.alert.level(), x + dp(16), y + (height - dp(40)) / 2, dp(40));
+        draw(canvas, message, x + dp(70), y + (height - message.getHeight()) / 2);
+        chevron(canvas, x + width - dp(20), y + height / 2, 0xFFFFFFFF);
+        return y + height + dp(12);
+    }
+
+    /** The headline index: a six-band dial with the level and main pollutant beneath it. */
+    private float drawUsCard(Canvas canvas, float x, float y, float width) {
+        int aqi = reading.usAqi;
+        int color = AqiCalculator.usColor(aqi);
+        int background = palette.tint(color, palette.dark ? 0.17f : 0.15f);
+        float pad = dp(18);
+        float radius = Math.min(dp(96), (width - dp(88)) / 2);
+        float band = dp(13);
+        float labelHeight = lineHeight(12.5f, true);
+        float centreX = x + width / 2;
+        float centreY = y + pad + labelHeight + dp(10) + band / 2 + radius;
+        float dialBottom = centreY + radius * 0.5f + band / 2;
+
+        String level = reading.usLevel;
+        float levelWidth = Math.min(width - pad * 2 - dp(28), measure(level, 16, true) + dp(2));
+        StaticLayout levelLayout = block(S_US_LEVEL, level, 16, true, Palette.on(color), levelWidth,
+                Layout.Alignment.ALIGN_CENTER, 2);
+        float pillHeight = levelLayout.getHeight() + dp(14);
+        float pillTop = dialBottom + dp(12);
+        float divider = pillTop + pillHeight + dp(16);
+        float rowHeight = lineHeight(12.5f, false) + dp(2) + lineHeight(17, true);
+        float height = divider + dp(14) + rowHeight + pad - y;
+
+        target(T_US, x, y, x + width, y + height, dp(26));
+        fill(background);
+        canvas.drawRoundRect(x, y, x + width, y + height, dp(26), dp(26), paint);
+        top(canvas, "US AQI+", x + pad, y + pad, 12.5f, palette.muted, true);
+        chevron(canvas, x + width - pad - dp(2), y + pad + labelHeight / 2, palette.muted);
+
+        // Six equal segments, one per US category, so the hazardous range does not swamp the dial.
+        float fraction = usFraction(aqi) * gauge;
+        float reach = 150 + 240 * fraction;
+        oval.set(centreX - radius, centreY - radius, centreX + radius, centreY + radius);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(band);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        for (int i = 0; i < 6; i++) {
+            float start = 150 + i * 40 + 1.2f, sweep = 40 - 2.4f;
+            int segment = AqiCalculator.usColor(US_SAMPLES[i]);
+            paint.setColor(Palette.alpha(segment, palette.dark ? 60 : 66));
+            canvas.drawArc(oval, start, sweep, false, paint);
+            float filled = Math.min(sweep, reach - start);
+            if (filled > 0) {
+                paint.setColor(segment);
+                canvas.drawArc(oval, start, filled, false, paint);
+            }
         }
-        return y + containerHeight;
+        double angle = Math.toRadians(reach);
+        float knobX = centreX + radius * (float) Math.cos(angle), knobY = centreY + radius * (float) Math.sin(angle);
+        fill(background);
+        canvas.drawCircle(knobX, knobY, dp(11), paint);
+        fill(palette.readable(color));
+        canvas.drawCircle(knobX, knobY, dp(7), paint);
+
+        float numberSize = Math.min(54 * scaled, radius * 0.72f);
+        textPaint.setTypeface(BOLD_FONT);
+        textPaint.setTextSize(numberSize);
+        textPaint.setColor(palette.ink);
+        textPaint.setTextAlign(Paint.Align.CENTER);
+        canvas.drawText(Integer.toString(Math.round(aqi * gauge)), centreX, centreY + numberSize * 0.30f, textPaint);
+        textPaint.setTypeface(NORMAL_FONT);
+        textPaint.setTextSize(Math.min(13 * scaled, radius * 0.2f));
+        textPaint.setColor(palette.muted);
+        canvas.drawText("of 500", centreX, centreY + numberSize * 0.30f + Math.min(20 * scaled, radius * 0.3f), textPaint);
+        textPaint.setTextAlign(Paint.Align.LEFT);
+
+        float pillWidth = levelWidth + dp(28);
+        fill(color);
+        canvas.drawRoundRect(centreX - pillWidth / 2, pillTop, centreX + pillWidth / 2, pillTop + pillHeight,
+                pillHeight / 2, pillHeight / 2, paint);
+        draw(canvas, levelLayout, centreX - levelWidth / 2, pillTop + dp(7));
+
+        stroke(Palette.alpha(palette.ink, 26), dp(1));
+        canvas.drawLine(x + pad, divider, x + width - pad, divider, paint);
+        float rowTop = divider + dp(14);
+        float valueTop = top(canvas, "Main pollutant", x + pad, rowTop, 12.5f, palette.muted, false) + dp(2);
+        top(canvas, symbol(reading.mainPollutant), x + pad, valueTop, 17, palette.ink, true);
+        textPaint.setTextAlign(Paint.Align.RIGHT);
+        top(canvas, reading.pollutantValue(reading.mainPollutant), x + width - pad, valueTop, 17, palette.ink, true);
+        textPaint.setTextAlign(Paint.Align.LEFT);
+        return y + height;
     }
 
-    private void drawPollutantTile(Canvas canvas, float x, float y, float width, float height,
-                                   String label, String name) {
-        rounded(canvas, x, y, x + width, y + height, dp(17), TILE);
-        text(canvas, label, x + dp(14), y + dp(30), 18, INK,
-                Paint.Align.LEFT, Typeface.NORMAL);
-        text(canvas, name, x + dp(14), y + dp(53), 12.5f, MUTED,
-                Paint.Align.LEFT, Typeface.NORMAL);
-        text(canvas, "›", x + width - dp(12), y + dp(30), 20, MUTED, Paint.Align.RIGHT, Typeface.NORMAL);
-        double value = pollutantValue(label);
-        HistorySeries.Metric metric = HistorySeries.Metric.forLabel(label);
-        int band = HistorySeries.band(metric, value);
-        paint.setColor(HistorySeries.color(metric, band));
-        canvas.drawCircle(x + dp(18), y + dp(88), dp(5.5f), paint);
-        text(canvas, reading.pollutantValue(label), x + dp(31), y + dp(94), 15,
-                INK, Paint.Align.LEFT, Typeface.BOLD);
+    /** European AQI and US NowCast, side by side when there is room for both. */
+    private float drawIndexRow(Canvas canvas, float x, float y, float width) {
+        boolean stacked = width < dp(300) || fontScale > 1.35f;
+        float gap = dp(12);
+        float cardWidth = stacked ? width : (width - gap) / 2;
+        float pad = dp(16);
+        float inner = cardWidth - pad * 2;
+
+        int band = reading.euBand;
+        int euColor = AqiCalculator.euColor(band);
+        var nowcast = reading.nowcast;
+        boolean rated = nowcast != null && nowcast.aqi() >= 0;
+        int nowColor = rated ? AqiCalculator.usColor(nowcast.aqi()) : AqiCalculator.euColor(0);
+
+        StaticLayout euLevel = block(S_EU_LEVEL, reading.euLevel, 15, true, palette.ink, inner,
+                Layout.Alignment.ALIGN_NORMAL, 2);
+        StaticLayout nowLevel = block(S_NOW_LEVEL, nowcast == null ? "Not enough data" : nowcast.level(), 15, true,
+                palette.ink, inner, Layout.Alignment.ALIGN_NORMAL, 3);
+        StaticLayout nowDetail = block(S_NOW_DETAIL, nowcastDetail, 12, false, palette.muted, inner,
+                Layout.Alignment.ALIGN_NORMAL, 4);
+        int reported = reading.availablePollutants() - (AirQualityReading.isPresent(reading.co) ? 1 : 0);
+        boolean partial = reported < 5;
+        float head = pad + lineHeight(12.5f, true) + dp(6) + lineHeight(32, true) + dp(4);
+        float euHeight = head + euLevel.getHeight() + dp(12) + dp(6)
+                + (partial ? dp(8) + lineHeight(12, false) : 0) + pad;
+        float nowHeight = head + nowLevel.getHeight() + dp(8) + nowDetail.getHeight() + pad;
+        float height = stacked ? euHeight : Math.max(euHeight, nowHeight);
+
+        // European AQI
+        target(T_EU, x, y, x + cardWidth, y + height, dp(22));
+        fill(palette.tint(euColor, palette.dark ? 0.15f : 0.14f));
+        canvas.drawRoundRect(x, y, x + cardWidth, y + height, dp(22), dp(22), paint);
+        float line = top(canvas, "European AQI", x + pad, y + pad, 12.5f, palette.muted, true) + dp(6);
+        chevron(canvas, x + cardWidth - pad, y + pad + lineHeight(12.5f, true) / 2, palette.muted);
+        String score = band > 0 ? Integer.toString(band) : "—";
+        float scoreWidth = measure(score, 32, true);
+        float next = top(canvas, score, x + pad, line, 32, palette.ink, true) + dp(4);
+        baseline(canvas, " / 6", x + pad + scoreWidth, line, 32, 14, palette.muted);
+        draw(canvas, euLevel, x + pad, next);
+        float barTop = next + euLevel.getHeight() + dp(12);
+        float segment = (inner - dp(3) * 5) / 6;
+        for (int i = 1; i <= 6; i++) {
+            float segmentLeft = x + pad + (i - 1) * (segment + dp(3));
+            fill(i <= band ? AqiCalculator.euColor(i) : Palette.alpha(palette.ink, 26));
+            canvas.drawRoundRect(segmentLeft, barTop, segmentLeft + segment, barTop + dp(6), dp(3), dp(3), paint);
+        }
+        if (partial) top(canvas, fit(-1, "Partial · " + reported + "/5 pollutants", inner, 12, false),
+                x + pad, barTop + dp(6) + dp(8), 12, palette.muted, false);
+
+        // US NowCast
+        float nowX = stacked ? x : x + cardWidth + gap;
+        float nowY = stacked ? y + height + gap : y;
+        float nowCardHeight = stacked ? nowHeight : height;
+        target(T_NOWCAST, nowX, nowY, nowX + cardWidth, nowY + nowCardHeight, dp(22));
+        fill(rated ? palette.tint(nowColor, palette.dark ? 0.15f : 0.14f) : palette.surface);
+        canvas.drawRoundRect(nowX, nowY, nowX + cardWidth, nowY + nowCardHeight, dp(22), dp(22), paint);
+        if (!rated) {
+            stroke(palette.outline, dp(1));
+            canvas.drawRoundRect(nowX, nowY, nowX + cardWidth, nowY + nowCardHeight, dp(22), dp(22), paint);
+        }
+        line = top(canvas, "US NowCast", nowX + pad, nowY + pad, 12.5f, palette.muted, true) + dp(6);
+        chevron(canvas, nowX + cardWidth - pad, nowY + pad + lineHeight(12.5f, true) / 2, palette.muted);
+        String nowScore = nowcast == null ? "—" : nowcast.score();
+        float dotX = nowX + pad + measure(nowScore, 32, true) + dp(12);
+        next = top(canvas, nowScore, nowX + pad, line, 32, palette.ink, true) + dp(4);
+        if (rated) {
+            fill(nowColor);
+            canvas.drawCircle(dotX, line + lineHeight(32, true) / 2, dp(6), paint);
+        }
+        draw(canvas, nowLevel, nowX + pad, next);
+        draw(canvas, nowDetail, nowX + pad, next + nowLevel.getHeight() + dp(8));
+        return stacked ? nowY + nowCardHeight : y + height;
     }
 
-    private double pollutantValue(String label) {
-        return switch (label) {
-            case "PM2.5" -> reading.pm25;
-            case "PM10" -> reading.pm10;
-            case "O3" -> reading.o3;
-            case "NO2" -> reading.no2;
-            case "CO" -> reading.co;
-            case "SO2" -> reading.so2;
-            default -> Double.NaN;
-        };
+    private float drawPollutants(Canvas canvas, float x, float y, float width) {
+        float titleBottom = top(canvas, "Pollutants", x + dp(4), y, 19, palette.ink, true);
+        String hint = "Tap for 24 h history";
+        if (measure(hint, 12.5f, false) + measure("Pollutants", 19, true) + dp(28) < width) {
+            textPaint.setTextAlign(Paint.Align.RIGHT);
+            top(canvas, hint, x + width - dp(4), y + lineHeight(19, true) - lineHeight(12.5f, false) - dp(1),
+                    12.5f, palette.muted, false);
+            textPaint.setTextAlign(Paint.Align.LEFT);
+        }
+        y = titleBottom + dp(12);
+        boolean single = width < dp(280) || fontScale > 1.6f;
+        int columns = single ? 1 : 2;
+        float gap = dp(10), pad = dp(14);
+        float tileWidth = (width - gap * (columns - 1)) / columns;
+        float tileHeight = pad + lineHeight(16, true) + lineHeight(12, false) + dp(10)
+                + lineHeight(20, true) + dp(6) + lineHeight(12, false) + pad;
+        for (int p = 0; p < 6; p++) {
+            float left = x + (p % columns) * (tileWidth + gap);
+            float tileTop = y + (p / columns) * (tileHeight + gap);
+            target(T_POLLUTANT + p, left, tileTop, left + tileWidth, tileTop + tileHeight, dp(18));
+            card(canvas, left, tileTop, tileWidth, tileHeight, dp(18), palette.surface, true);
+            float inner = tileWidth - pad * 2;
+            float line = top(canvas, SYMBOLS[p], left + pad, tileTop + pad, 16, palette.ink, true);
+            chevron(canvas, left + tileWidth - pad, tileTop + pad + lineHeight(16, true) / 2, palette.muted);
+            line = top(canvas, fit(S_TILE_NAME + p, NAMES[p], inner, 12, false), left + pad, line, 12,
+                    palette.muted, false) + dp(10);
+            float valueWidth = measure(tileValue[p], 20, true);
+            float next = top(canvas, tileValue[p], left + pad, line, 20, palette.ink, true) + dp(6);
+            if (!tileUnit[p].isEmpty()) baseline(canvas, " " + tileUnit[p], left + pad + valueWidth, line, 20, 12, palette.muted);
+            fill(tileColor[p]);
+            float levelHeight = lineHeight(12, false);
+            canvas.drawCircle(left + pad + dp(4.5f), next + levelHeight / 2, dp(4.5f), paint);
+            top(canvas, fit(S_TILE_LEVEL + p, tileLevel[p], inner - dp(16), 12, false), left + pad + dp(16), next,
+                    12, palette.muted, false);
+        }
+        int rows = (6 + columns - 1) / columns;
+        return y + rows * tileHeight + (rows - 1) * gap;
     }
 
     private float drawHealthAdvice(Canvas canvas, float x, float y, float width) {
-        int bodyWidth = Math.max(1, (int) (width - dp(40)));
+        int bodyWidth = Math.max(1, (int) (width - dp(44)));
         long now = System.currentTimeMillis();
         if (adviceLayout == null || adviceWidth != bodyWidth || now - adviceCheckedAt > 60_000) {
             advice = HealthAdvice.forReading(reading, now);
@@ -422,25 +541,23 @@ public final class AirQualityView extends View {
                 body.append(advice.sensitive());
                 body.append("\n\nChildren, older adults, and people with heart or lung conditions.");
             }
+            TextPaint advicePaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+            advicePaint.setColor(palette.ink);
+            advicePaint.setTypeface(NORMAL_FONT);
+            advicePaint.setTextSize(15 * scaled);
             adviceLayout = StaticLayout.Builder.obtain(body, 0, body.length(), advicePaint, bodyWidth)
-                    .setAlignment(Layout.Alignment.ALIGN_NORMAL)
                     .setIncludePad(false).setLineSpacing(dp(3), 1f).build();
             adviceWidth = bodyWidth;
             adviceCheckedAt = now;
-            setContentDescription(reading.locationName + ", US AQI " + reading.usAqi + ", "
-                    + reading.usLevel + ", European AQI " + reading.euBand + ", " + reading.euLevel
-                    + nowcastDescription() + ". " + reading.alert.message()
-                    + ". " + reading.otherStationRecords.message() + ". " + body);
+            describe(body);
         }
-        float height = adviceLayout.getHeight() + dp(40);
-        roundedShadow(canvas, x, y, x + width, y + height, dp(22), Color.WHITE);
-        int accent = advice.sensitive().isEmpty() ? MUTED : advice.caution() == 0 ? 0xFF177A68
-                : advice.caution() <= 2 ? 0xFFC57819 : 0xFFC44050;
-        rounded(canvas, x + dp(1), y + dp(22), x + dp(5), y + height - dp(22), dp(2), accent);
-        canvas.save();
-        canvas.translate(x + dp(20), y + dp(20));
-        adviceLayout.draw(canvas);
-        canvas.restore();
+        float height = adviceLayout.getHeight() + dp(36);
+        card(canvas, x, y, width, height, dp(22), palette.surface, true);
+        int accent = advice.sensitive().isEmpty() ? palette.muted : advice.caution() == 0 ? palette.accent
+                : advice.caution() <= 2 ? 0xFFD98A1F : 0xFFD9485B;
+        fill(accent);
+        canvas.drawRoundRect(x + dp(12), y + dp(20), x + dp(16), y + height - dp(20), dp(2), dp(2), paint);
+        draw(canvas, adviceLayout, x + dp(28), y + dp(18));
         return y + height;
     }
 
@@ -457,102 +574,174 @@ public final class AirQualityView extends View {
             body.append("\n");
         }
     }
-    private String nowcastDescription() {
-        return reading.nowcast == null ? ", US NowCast not enough data" : ", US NowCast " + reading.nowcast.score()
-                + ", " + reading.nowcast.level() + ", " + reading.nowcast.status();
+
+    private float drawStationCard(Canvas canvas, float x, float y, float width) {
+        float pad = dp(16), icon = dp(44);
+        float textLeft = x + pad + icon + dp(14);
+        float textWidth = x + width - pad - textLeft;
+        StaticLayout station = block(S_STATION, reading.sourceLabel(), 16, true, palette.ink, textWidth,
+                Layout.Alignment.ALIGN_NORMAL, 3);
+        float detailHeight = lineHeight(12.5f, false);
+        float body = Math.max(icon, station.getHeight() + dp(3) + detailHeight * 2);
+        StaticLayout note = stationNote.isEmpty() ? null : block(S_REMINDER, stationNote, 12.5f, false,
+                palette.muted, width - pad * 2, Layout.Alignment.ALIGN_NORMAL, 8);
+        float rowTop = y + pad + body + (note == null ? 0 : dp(12) + note.getHeight()) + dp(14);
+        float height = rowTop + dp(48) - y;
+        card(canvas, x, y, width, height, dp(22), palette.surface, true);
+
+        fill(Palette.alpha(palette.accent, palette.dark ? 44 : 28));
+        canvas.drawCircle(x + pad + icon / 2, y + pad + icon / 2, icon / 2, paint);
+        drawStationGlyph(canvas, x + pad + icon / 2, y + pad + icon / 2 - dp(1));
+        draw(canvas, station, textLeft, y + pad);
+        float line = y + pad + station.getHeight() + dp(3);
+        line = top(canvas, fit(S_SOURCE, reading.sourceName, textWidth, 12.5f, false), textLeft, line, 12.5f,
+                palette.muted, false);
+        top(canvas, distance, textLeft, line, 12.5f, palette.muted, false);
+        if (note != null) draw(canvas, note, x + pad, y + pad + body + dp(12));
+
+        stroke(palette.outline, dp(1));
+        canvas.drawLine(x + pad, rowTop, x + width - pad, rowTop, paint);
+        target(T_BACKUP, x, rowTop, x + width, rowTop + dp(48), dp(18));
+        centredLeft(canvas, "OpenAQ backup settings", x + pad, rowTop + dp(24), 14, palette.accent, true);
+        chevron(canvas, x + width - pad, rowTop + dp(24), palette.accent);
+        return y + height;
     }
 
-    private void drawEmptyHeader(Canvas canvas) {
-        text(canvas, "Local Air Quality", dp(22), dp(52), 28, INK,
-                Paint.Align.LEFT, Typeface.BOLD);
-        contentHeight = getHeight();
-    }
-
-    private void drawStateOverlay(Canvas canvas) {
-        if (stateMessage == null) return;
-        float width = Math.min(getWidth() - dp(36), dp(390));
-        float left = (getWidth() - width) / 2;
-        float top = reading == null ? Math.max(dp(120), getHeight() * 0.34f) : dp(102);
-        float bottom = top + dp(116);
-        roundedShadow(canvas, left, top, left + width, bottom, dp(20), Color.WHITE);
-        text(canvas, stateMessage, left + width / 2, top + dp(42), 18, INK,
-                Paint.Align.CENTER, Typeface.BOLD);
-        if (actionLabel != null) {
-            float actionWidth = Math.min(dp(220), width - dp(48));
-            actionBounds.set(left + (width - actionWidth) / 2, top + dp(60),
-                    left + (width + actionWidth) / 2, top + dp(103));
-            rounded(canvas, actionBounds.left, actionBounds.top, actionBounds.right,
-                    actionBounds.bottom, dp(14), 0xFF177A68);
-            text(canvas, actionLabel, actionBounds.centerX(), actionBounds.centerY() + dp(6),
-                    15, Color.WHITE, Paint.Align.CENTER, Typeface.BOLD);
+    /** Before the first reading: a loading skeleton, or one clear request with one button. */
+    private float drawEmpty(Canvas canvas, float x, float y, float width) {
+        y = drawHeader(canvas, x, y, width, "Local Air Quality", "Nearest official monitoring station") + dp(22);
+        if (refreshing || stateMessage == null) {
+            float pulse = 0.55f + 0.45f * (float) Math.sin(SystemClock.uptimeMillis() / 260.0);
+            fill(Palette.alpha(palette.ink, Math.round((palette.dark ? 22 : 14) * (0.6f + 0.4f * pulse))));
+            canvas.drawRoundRect(x, y, x + width, y + dp(250), dp(26), dp(26), paint);
+            float half = (width - dp(12)) / 2;
+            canvas.drawRoundRect(x, y + dp(262), x + half, y + dp(392), dp(22), dp(22), paint);
+            canvas.drawRoundRect(x + half + dp(12), y + dp(262), x + width, y + dp(392), dp(22), dp(22), paint);
+            centred(canvas, stateMessage == null ? "Loading" : stateMessage, x + width / 2, y + dp(125), 16,
+                    palette.muted, true);
+            return y + dp(392);
         }
+        float pad = dp(22);
+        StaticLayout message = block(S_STATE, stateMessage, 19, true, palette.ink, width - pad * 2,
+                Layout.Alignment.ALIGN_CENTER, 5);
+        float height = pad + dp(64) + dp(18) + message.getHeight() + (actionLabel == null ? 0 : dp(22) + dp(40)) + pad;
+        float cardTop = Math.max(y, (getHeight() - height) / 2 - dp(24));
+        card(canvas, x, cardTop, width, height, dp(26), palette.surface, true);
+        float cx = x + width / 2, iconY = cardTop + pad + dp(32);
+        fill(Palette.alpha(palette.accent, palette.dark ? 44 : 28));
+        canvas.drawCircle(cx, iconY, dp(32), paint);
+        drawStationGlyph(canvas, cx, iconY - dp(1));
+        draw(canvas, message, x + pad, cardTop + pad + dp(82));
+        if (actionLabel != null) {
+            float buttonWidth = Math.min(width - pad * 2, Math.max(dp(180), measure(actionLabel, 15, true) + dp(48)));
+            drawButton(canvas, cx - buttonWidth / 2, cardTop + pad + dp(82) + message.getHeight() + dp(22), buttonWidth);
+        }
+        return cardTop + height;
     }
 
-    private void drawRefreshIndicator(Canvas canvas) {
-        float centerY = dp(16) + Math.min(dp(25), pullDistance * 0.25f);
-        float rotation = refreshing ? (SystemClock.uptimeMillis() % 1000) * 0.36f
-                : Math.min(270, pullDistance * 2);
-        drawRefreshGlyph(canvas, getWidth() / 2f, centerY, dp(9), 0xFF177A68, rotation);
+    private void drawPullIndicator(Canvas canvas) {
+        float travel = refreshing ? dp(44) : Math.min(dp(64), pullDistance * 0.5f);
+        float cx = getWidth() / 2f, cy = insetTop + travel - dp(6);
+        fill(palette.surface);
+        canvas.drawCircle(cx, cy, dp(19), paint);
+        stroke(palette.outline, dp(1));
+        canvas.drawCircle(cx, cy, dp(19), paint);
+        boolean armed = pullDistance >= dp(84);
+        drawRefreshGlyph(canvas, cx, cy, dp(8.5f), armed || refreshing ? palette.accent : palette.muted,
+                refreshing ? (SystemClock.uptimeMillis() % 900) * 0.4f : Math.min(300, pullDistance * 1.6f));
     }
+
+    // ---------------------------------------------------------------- input
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        if (velocity == null) velocity = VelocityTracker.obtain();
+        velocity.addMovement(event);
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN -> {
+                scroller.forceFinished(true);
+                downX = event.getX();
                 downY = lastY = event.getY();
-                moved = false;
+                dragging = false;
+                pressed = targetAt(downX, downY + scrollOffset);
+                invalidate();
                 return true;
             }
             case MotionEvent.ACTION_MOVE -> {
                 float y = event.getY();
-                float dy = lastY - y;
-                if (Math.abs(y - downY) > dp(5)) moved = true;
-                if (scrollOffset <= 0 && y > downY) {
-                    pullDistance = Math.min(dp(130), (y - downY) * 0.7f);
-                } else {
-                    pullDistance = 0;
-                    scrollOffset = clamp(scrollOffset + dy, 0,
-                            Math.max(0, contentHeight - getHeight()));
+                if (!dragging && (Math.abs(y - downY) > touchSlop || Math.abs(event.getX() - downX) > touchSlop)) {
+                    dragging = true;
+                    pressed = -1;
+                    lastY = y;
+                    if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
                 }
-                lastY = y;
-                invalidate();
+                if (dragging) {
+                    float dy = y - lastY;
+                    if (scrollOffset <= 0 && (pullDistance > 0 || dy > 0) && !refreshing) {
+                        pullDistance = Math.max(0, Math.min(dp(170), pullDistance + dy * 0.75f));
+                    } else {
+                        pullDistance = 0;
+                        scrollOffset = clamp(scrollOffset - dy, 0, maxScroll());
+                    }
+                    lastY = y;
+                    invalidate();
+                }
                 return true;
             }
             case MotionEvent.ACTION_CANCEL -> {
                 pullDistance = 0;
-                moved = false;
+                pressed = -1;
+                dragging = false;
                 invalidate();
                 return true;
             }
             case MotionEvent.ACTION_UP -> {
-                float x = event.getX();
-                float y = event.getY();
-                if (pullDistance >= dp(72) && !refreshing && listener != null) {
-                    listener.onRefreshRequested();
-                } else if (!moved && updateBounds.contains(x, y + scrollOffset)
-                        && !refreshing && listener != null) {
-                    listener.onRefreshRequested();
-                } else if (!moved && actionBounds.contains(x, y) && listener != null && action != null) {
-                    listener.onActionRequested(action);
-                } else if (!moved && stateMessage == null && reading != null && listener != null) {
-                    if (alertBounds.contains(x, y + scrollOffset) && reading.alert.active()) listener.onAlertSelected();
-                    else if (nowcastBounds.contains(x, y + scrollOffset)) listener.onPollutantSelected("US NowCast");
-                    else if (usBounds.contains(x, y + scrollOffset)) listener.onPollutantSelected("US AQI+");
-                    else if (euBounds.contains(x, y + scrollOffset)) listener.onPollutantSelected("European AQI");
-                    for (int i = 0; i < pollutantBounds.length; i++) {
-                        if (pollutantBounds[i].contains(x, y + scrollOffset)) {
-                            listener.onPollutantSelected(com.localairquality.app.data.PollutantHistory.LABELS[i]);
-                            break;
+                if (dragging) {
+                    if (pullDistance >= dp(84) && !refreshing && listener != null) {
+                        listener.onRefreshRequested();
+                    } else if (pullDistance <= 0) {
+                        velocity.computeCurrentVelocity(1000, maxFling);
+                        float speed = -velocity.getYVelocity();
+                        if (Math.abs(speed) > minFling) {
+                            scroller.fling(0, Math.round(scrollOffset), 0, Math.round(speed), 0, 0,
+                                    0, Math.round(maxScroll()));
                         }
                     }
+                } else {
+                    int hit = targetAt(event.getX(), event.getY() + scrollOffset);
+                    if (hit >= 0 && hit == pressed) activate(hit);
+                    performClick();
                 }
-                if (!moved) performClick();
                 pullDistance = 0;
-                invalidate();
+                pressed = -1;
+                dragging = false;
+                velocity.clear();
+                postInvalidateOnAnimation();
                 return true;
             }
         }
         return super.onTouchEvent(event);
+    }
+
+    @Override
+    public boolean onGenericMotionEvent(MotionEvent event) {
+        if ((event.getSource() & InputDevice.SOURCE_CLASS_POINTER) != 0
+                && event.getActionMasked() == MotionEvent.ACTION_SCROLL) {
+            float delta = -event.getAxisValue(MotionEvent.AXIS_VSCROLL) * dp(64);
+            scroller.forceFinished(true);
+            scrollOffset = clamp(scrollOffset + delta, 0, maxScroll());
+            invalidate();
+            return true;
+        }
+        return super.onGenericMotionEvent(event);
+    }
+
+    @Override
+    public void computeScroll() {
+        if (scroller.computeScrollOffset()) {
+            scrollOffset = clamp(scroller.getCurrY(), 0, maxScroll());
+            postInvalidateOnAnimation();
+        }
     }
 
     @Override
@@ -561,118 +750,257 @@ public final class AirQualityView extends View {
         return true;
     }
 
-    @Override public void onInitializeAccessibilityNodeInfo(android.view.accessibility.AccessibilityNodeInfo info) {
+    private float maxScroll() {
+        return Math.max(0, contentHeight - getHeight());
+    }
+
+    private int targetAt(float x, float y) {
+        // The action button sits on top of whatever it covers.
+        if (targets[T_ACTION].contains(x, y)) return T_ACTION;
+        for (int i = 0; i < TARGETS; i++) if (targets[i].contains(x, y)) return i;
+        return -1;
+    }
+
+    private void activate(int target) {
+        if (listener == null) return;
+        if (target == T_REFRESH) {
+            if (!refreshing) listener.onRefreshRequested();
+        } else if (target == T_ACTION) {
+            if (action != null) listener.onActionRequested(action);
+        } else if (reading == null) {
+            return;
+        } else if (target == T_ALERT) {
+            if (reading.alert.active()) listener.onAlertSelected();
+        } else if (target == T_BACKUP) listener.onActionRequested(Action.ENTER_API_KEY);
+        else if (target == T_US) listener.onPollutantSelected("US AQI+");
+        else if (target == T_EU) listener.onPollutantSelected("European AQI");
+        else if (target == T_NOWCAST) listener.onPollutantSelected("US NowCast");
+        else if (target >= T_POLLUTANT && target < T_POLLUTANT + 6) {
+            listener.onPollutantSelected(PollutantHistory.LABELS[target - T_POLLUTANT]);
+        }
+    }
+
+    // ---------------------------------------------------------------- accessibility
+
+    private void describe(CharSequence adviceText) {
+        setContentDescription(reading.locationName + ", US AQI " + reading.usAqi + ", "
+                + reading.usLevel + ", European AQI " + reading.euBand + ", " + reading.euLevel
+                + (reading.nowcast == null ? ", US NowCast not enough data" : ", US NowCast "
+                + reading.nowcast.score() + ", " + reading.nowcast.level() + ", " + reading.nowcast.status())
+                + ". " + reading.backupNotice() + ". " + reading.alert.message()
+                + ". " + reading.otherStationRecords.message() + (adviceText == null ? "" : ". " + adviceText));
+    }
+
+    @Override
+    public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
         super.onInitializeAccessibilityNodeInfo(info);
-        if (reading == null) return;
-        if (reading.alert.active()) info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(
+        if (reading == null) {
+            if (action != null && actionLabel != null) info.addAction(
+                    new AccessibilityNodeInfo.AccessibilityAction(0x01000022, actionLabel));
+            return;
+        }
+        info.addAction(new AccessibilityNodeInfo.AccessibilityAction(0x01000023, "Update air quality"));
+        info.addAction(new AccessibilityNodeInfo.AccessibilityAction(0x01000021, "Open OpenAQ backup settings"));
+        if (reading.alert.active()) info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
                 0x01000020, "Open alert reason, precautions and advice"));
-        String[] labels = {"US AQI+", "European AQI", "PM2.5", "PM10", "O3", "NO2", "CO", "SO2", "US NowCast"};
-        for (int i = 0; i < labels.length; i++) {
-            info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(
-                    0x01000000 + i, "Open " + labels[i] + " history"));
+        for (int i = 0; i < HISTORY_LABELS.length; i++) {
+            info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                    0x01000000 + i, "Open " + HISTORY_LABELS[i] + " history"));
         }
-    }
-    @Override public boolean performAccessibilityAction(int action, android.os.Bundle arguments) {
-        if (action == 0x01000020 && reading != null && reading.alert.active() && listener != null) {
-            listener.onAlertSelected();
-            return true;
-        }
-        String[] labels = {"US AQI+", "European AQI", "PM2.5", "PM10", "O3", "NO2", "CO", "SO2", "US NowCast"};
-        int index = action - 0x01000000;
-        if (reading != null && listener != null && index >= 0 && index < labels.length) {
-            listener.onPollutantSelected(labels[index]);
-            return true;
-        }
-        return super.performAccessibilityAction(action, arguments);
-    }
-    private void drawLocationArrow(Canvas canvas, float cx, float cy) {
-        Path path = new Path();
-        path.moveTo(cx - dp(12), cy - dp(7));
-        path.lineTo(cx + dp(14), cy - dp(15));
-        path.lineTo(cx + dp(5), cy + dp(13));
-        path.lineTo(cx, cy + dp(2));
-        path.close();
-        paint.setColor(0xFF627184);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2));
-        paint.setStrokeJoin(Paint.Join.ROUND);
-        canvas.drawPath(path, paint);
-        paint.setStyle(Paint.Style.FILL);
     }
 
-    private void drawStationGlyph(Canvas canvas, float cx, float cy) {
-        paint.setColor(0xFF177A68);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2));
-        canvas.drawCircle(cx, cy, dp(5), paint);
-        canvas.drawLine(cx, cy + dp(5), cx, cy + dp(13), paint);
-        canvas.drawLine(cx - dp(10), cy + dp(13), cx + dp(10), cy + dp(13), paint);
-        canvas.drawArc(new RectF(cx - dp(12), cy - dp(12), cx + dp(12), cy + dp(12)),
-                205, 130, false, paint);
-        paint.setStyle(Paint.Style.FILL);
+    @Override
+    public boolean performAccessibilityAction(int id, Bundle arguments) {
+        if (listener != null) {
+            if (id == 0x01000023 && !refreshing) { listener.onRefreshRequested(); return true; }
+            if (id == 0x01000022 && action != null) { listener.onActionRequested(action); return true; }
+            if (id == 0x01000021) { listener.onActionRequested(Action.ENTER_API_KEY); return true; }
+            if (id == 0x01000020 && reading != null && reading.alert.active()) {
+                listener.onAlertSelected();
+                return true;
+            }
+            int index = id - 0x01000000;
+            if (reading != null && index >= 0 && index < HISTORY_LABELS.length) {
+                listener.onPollutantSelected(HISTORY_LABELS[index]);
+                return true;
+            }
+        }
+        return super.performAccessibilityAction(id, arguments);
     }
 
-    private void drawRefreshGlyph(Canvas canvas, float cx, float cy, float radius,
-                                  int color, float rotation) {
-        canvas.save();
-        canvas.rotate(rotation, cx, cy);
+    // ---------------------------------------------------------------- primitives
+
+    private static float usFraction(int aqi) {
+        int value = Math.max(0, Math.min(500, aqi));
+        for (int i = 0; i < 6; i++) {
+            if (value <= US_BOUNDS[i + 1]) {
+                return (i + (value - US_BOUNDS[i]) / (float) (US_BOUNDS[i + 1] - US_BOUNDS[i])) / 6f;
+            }
+        }
+        return 1f;
+    }
+
+    private static String symbol(String label) {
+        for (int p = 0; p < 6; p++) if (PollutantHistory.LABELS[p].equals(label)) return SYMBOLS[p];
+        return label;
+    }
+
+    private void target(int id, float left, float top, float right, float bottom, float radius) {
+        targets[id].set(left, top, right, bottom);
+        targetRadius[id] = radius;
+    }
+
+    private void fill(int color) {
+        paint.setStyle(Paint.Style.FILL);
         paint.setColor(color);
+    }
+
+    private void stroke(int color, float width) {
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2.3f));
+        paint.setStrokeWidth(width);
         paint.setStrokeCap(Paint.Cap.ROUND);
-        RectF oval = new RectF(cx - radius, cy - radius, cx + radius, cy + radius);
-        canvas.drawArc(oval, -50, 285, false, paint);
-        paint.setStyle(Paint.Style.FILL);
-        Path arrow = new Path();
-        arrow.moveTo(cx + radius - dp(1), cy - dp(5));
-        arrow.lineTo(cx + radius + dp(5), cy - dp(4));
-        arrow.lineTo(cx + radius + dp(1), cy + dp(1));
-        arrow.close();
-        canvas.drawPath(arrow, paint);
+        paint.setColor(color);
+    }
+
+    private void card(Canvas canvas, float x, float y, float width, float height, float radius, int color,
+                      boolean outlined) {
+        fill(color);
+        canvas.drawRoundRect(x, y, x + width, y + height, radius, radius, paint);
+        if (outlined) {
+            stroke(palette.outline, dp(1));
+            canvas.drawRoundRect(x, y, x + width, y + height, radius, radius, paint);
+        }
+    }
+
+    private void font(float sizeSp, boolean bold) {
+        textPaint.setTextSize(sizeSp * scaled);
+        textPaint.setTypeface(bold ? BOLD_FONT : NORMAL_FONT);
+    }
+
+    private float lineHeight(float sizeSp, boolean bold) {
+        font(sizeSp, bold);
+        textPaint.getFontMetrics(metrics);
+        return metrics.descent - metrics.ascent;
+    }
+
+    private float measure(String value, float sizeSp, boolean bold) {
+        font(sizeSp, bold);
+        return textPaint.measureText(value);
+    }
+
+    /** Draws one line whose top edge is at {@code y}; returns the bottom edge. Honours the paint's alignment. */
+    private float top(Canvas canvas, String value, float x, float y, float sizeSp, int color, boolean bold) {
+        font(sizeSp, bold);
+        textPaint.setColor(color);
+        textPaint.getFontMetrics(metrics);
+        canvas.drawText(value == null ? "" : value, x, y - metrics.ascent, textPaint);
+        return y + metrics.descent - metrics.ascent;
+    }
+
+    /** Smaller text sharing the baseline of a larger line whose top edge is at {@code y}. */
+    private void baseline(Canvas canvas, String value, float x, float y, float lineSp, float sizeSp, int color) {
+        font(lineSp, true);
+        textPaint.getFontMetrics(metrics);
+        float base = y - metrics.ascent;
+        font(sizeSp, false);
+        textPaint.setColor(color);
+        canvas.drawText(value, x, base, textPaint);
+    }
+
+    private void centred(Canvas canvas, String value, float cx, float cy, float sizeSp, int color, boolean bold) {
+        textPaint.setTextAlign(Paint.Align.CENTER);
+        centredLeft(canvas, value, cx, cy, sizeSp, color, bold);
+        textPaint.setTextAlign(Paint.Align.LEFT);
+    }
+
+    /** One line centred vertically on {@code cy}. */
+    private void centredLeft(Canvas canvas, String value, float x, float cy, float sizeSp, int color, boolean bold) {
+        font(sizeSp, bold);
+        textPaint.setColor(color);
+        textPaint.getFontMetrics(metrics);
+        canvas.drawText(value, x, cy - (metrics.ascent + metrics.descent) / 2, textPaint);
+    }
+
+    /** Ellipsised single line, remembered per slot. Slot -1 is never cached. */
+    private String fit(int slot, String value, float width, float sizeSp, boolean bold) {
+        if (value == null) return "";
+        if (slot >= 0 && value.equals(slotText[slot]) && slotWidth[slot] == width) return slotFitted[slot];
+        font(sizeSp, bold);
+        String fitted = TextUtils.ellipsize(value, textPaint, Math.max(1, width), TextUtils.TruncateAt.END).toString();
+        if (slot >= 0) {
+            slotText[slot] = value;
+            slotWidth[slot] = width;
+            slotFitted[slot] = fitted;
+        }
+        return fitted;
+    }
+
+    /** Wrapped text, rebuilt only when its content or width changes. */
+    private StaticLayout block(int slot, CharSequence value, float sizeSp, boolean bold, int color, float width,
+                               Layout.Alignment alignment, int maxLines) {
+        int available = Math.max(1, (int) width);
+        if (layouts[slot] != null && value.equals(slotText[slot]) && slotWidth[slot] == available
+                && layouts[slot].getPaint().getColor() == color) return layouts[slot];
+        TextPaint own = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        own.setTextSize(sizeSp * scaled);
+        own.setTypeface(bold ? BOLD_FONT : NORMAL_FONT);
+        own.setColor(color);
+        layouts[slot] = StaticLayout.Builder.obtain(value, 0, value.length(), own, available)
+                .setAlignment(alignment).setIncludePad(false).setLineSpacing(dp(2), 1f)
+                .setMaxLines(maxLines).setEllipsize(TextUtils.TruncateAt.END).build();
+        slotText[slot] = value;
+        slotWidth[slot] = available;
+        return layouts[slot];
+    }
+
+    private void draw(Canvas canvas, StaticLayout layout, float x, float y) {
+        canvas.save();
+        canvas.translate(x, y);
+        layout.draw(canvas);
         canvas.restore();
     }
 
-    private void rounded(Canvas canvas, float left, float top, float right, float bottom,
-                         float radius, int color) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(color);
-        canvas.drawRoundRect(left, top, right, bottom, radius, radius, paint);
+    private void chevron(Canvas canvas, float right, float cy, int color) {
+        stroke(color, dp(1.8f));
+        paint.setStrokeJoin(Paint.Join.ROUND);
+        path.rewind();
+        path.moveTo(right - dp(6), cy - dp(5));
+        path.lineTo(right - dp(1), cy);
+        path.lineTo(right - dp(6), cy + dp(5));
+        canvas.drawPath(path, paint);
     }
 
-    private void roundedShadow(Canvas canvas, float left, float top, float right, float bottom,
-                               float radius, int color) {
-        paint.setShadowLayer(dp(9), 0, dp(3), 0x16000000);
-        rounded(canvas, left, top, right, bottom, radius, color);
-        paint.clearShadowLayer();
+    private void drawStationGlyph(Canvas canvas, float cx, float cy) {
+        stroke(palette.accent, dp(2));
+        canvas.drawCircle(cx, cy - dp(2), dp(4.5f), paint);
+        canvas.drawLine(cx, cy + dp(2.5f), cx, cy + dp(11), paint);
+        canvas.drawLine(cx - dp(8), cy + dp(11), cx + dp(8), cy + dp(11), paint);
+        oval.set(cx - dp(11), cy - dp(13), cx + dp(11), cy + dp(9));
+        canvas.drawArc(oval, 205, 130, false, paint);
     }
 
-    private void text(Canvas canvas, String value, float x, float baseline, float sizeSp,
-                      int color, Paint.Align align, int style) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(color);
-        paint.setTextAlign(align);
-        paint.setTextSize(sizeSp * scaledDensity);
-        paint.setTypeface(style == Typeface.BOLD ? BOLD_FONT : NORMAL_FONT);
-        canvas.drawText(value == null ? "" : value, x, baseline, paint);
+    private void drawRefreshGlyph(Canvas canvas, float cx, float cy, float radius, int color, float rotation) {
+        canvas.save();
+        canvas.rotate(rotation, cx, cy);
+        stroke(color, dp(2.2f));
+        oval.set(cx - radius, cy - radius, cx + radius, cy + radius);
+        canvas.drawArc(oval, -50, 285, false, paint);
+        fill(color);
+        path.rewind();
+        path.moveTo(cx + radius - dp(1), cy - dp(5.5f));
+        path.lineTo(cx + radius + dp(5), cy - dp(4));
+        path.lineTo(cx + radius + dp(1), cy + dp(1.5f));
+        path.close();
+        canvas.drawPath(path, paint);
+        canvas.restore();
     }
 
     private String formatDateTime(long millis) {
         if (millis <= 0) return "—";
-        return DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-                .format(new Date(millis));
+        return DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(new Date(millis));
     }
 
-    private int darken(int color, float factor) {
-        return Color.rgb((int) (Color.red(color) * factor),
-                (int) (Color.green(color) * factor),
-                (int) (Color.blue(color) * factor));
-    }
-
-    private int withAlpha(int color, int alpha) {
-        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color));
-    }
-
-    private float clamp(float value, float min, float max) {
+    private static float clamp(float value, float min, float max) {
         return Math.max(min, Math.min(max, value));
     }
 
@@ -680,6 +1008,3 @@ public final class AirQualityView extends View {
         return value * density;
     }
 }
-
-
-

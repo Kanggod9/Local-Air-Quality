@@ -205,3 +205,4 @@ public final class AqiCalculator {
     public record UsResult(int aqi, String level, String pollutant) {}
     public record EuResult(int band, String level, String pollutant) {}
 }
+

@@ -87,7 +87,8 @@ public final class AirQualityWidgetProvider extends AppWidgetProvider {
         views.setTextViewText(R.id.widget_aqi, Integer.toString(reading.usAqi));
         views.setTextViewText(R.id.widget_location, reading.locationName);
         views.setTextViewText(R.id.widget_station,
-                reading.stationName + String.format(Locale.getDefault(), "  %.1f km", reading.distanceKm));
+                (reading.isBackup()?"Backup · ":"") + reading.stationName
+                        + String.format(Locale.getDefault(), "  %.1f km", reading.distanceKm));
         views.setTextViewText(R.id.widget_level, reading.usLevel);
         views.setTextViewText(R.id.widget_pollutant,
                 reading.mainPollutant + "\n" + reading.pollutantValue(reading.mainPollutant));

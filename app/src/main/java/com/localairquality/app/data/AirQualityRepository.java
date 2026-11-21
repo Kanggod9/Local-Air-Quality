@@ -11,11 +11,37 @@ public final class AirQualityRepository {
             double longitude,
             String locationName
     ) throws Exception {
-        if (isSingapore(latitude, longitude)) {
-            return NeaRepository.fetch(latitude, longitude, locationName);
-        }
         String key = ReadingStore.openAqKey(context);
+        AirQualityReading previous=ReadingStore.loadReading(context);
+        if (isSingapore(latitude, longitude)) {
+            AirQualityReading target=NeaRepository.target(latitude,longitude,locationName);
+            if(previous!=null && previous.historyStationId().equals(target.stationId))
+                target=previous.isBackup()?previous.primary:previous;
+            AirQualityReading primary=target;
+            return BackupPolicy.fetch(primary,previous,!key.isEmpty(),
+                    () -> NeaRepository.fetch(latitude,longitude,locationName),
+                    () -> OpenAqRepository.fetchAvailable(latitude,longitude,locationName,key,"",System::currentTimeMillis,OpenAqRepository.LIVE),
+                    System.currentTimeMillis());
+        }
         if (key.isEmpty()) throw new ApiKeyRequiredException("OpenAQ API key required");
+        AirQualityReading known=previous==null?null:previous.isBackup()?previous.primary:previous;
+        if(known!=null && (!known.stationId.startsWith("openaq:")
+                || NeaRepository.distanceKm(latitude,longitude,known.latitude,known.longitude)>25)) known=null;
+        AirQualityReading target=known;
+        try {
+            var nearest=OpenAqRepository.nearestTarget(latitude,longitude,locationName,key);
+            double knownDistance=known==null?Double.MAX_VALUE:NeaRepository.distanceKm(latitude,longitude,known.latitude,known.longitude);
+            if(known==null || (!known.stationId.equals(nearest.stationId)
+                    && (previous==null || !previous.isBackup() || nearest.distanceKm<knownDistance))) target=nearest;
+        } catch(java.util.concurrent.CancellationException cancelled) { throw cancelled; }
+        catch(Exception unavailable) { if(target==null) throw unavailable; }
+        if(target!=null) {
+            AirQualityReading primary=target;
+            return BackupPolicy.fetch(primary,previous,true,
+                    () -> OpenAqRepository.fetchKnown(primary,latitude,longitude,locationName,key),
+                    () -> OpenAqRepository.fetchAvailable(latitude,longitude,locationName,key,primary.stationId,System::currentTimeMillis,OpenAqRepository.LIVE),
+                    System.currentTimeMillis());
+        }
         return OpenAqRepository.fetch(latitude, longitude, locationName, key);
     }
 

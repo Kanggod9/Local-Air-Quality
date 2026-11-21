@@ -7,7 +7,6 @@ import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
 import android.location.Address;
 import android.location.Geocoder;
 import android.location.Location;
@@ -22,9 +21,6 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
-import android.view.View;
-import android.view.Window;
-import android.view.WindowInsetsController;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 
@@ -36,6 +32,8 @@ import com.localairquality.app.data.ReadingStore;
 import com.localairquality.app.data.RefreshFlow;
 import com.localairquality.app.notification.AirQualityNotification;
 import com.localairquality.app.ui.AirQualityView;
+import com.localairquality.app.ui.Palette;
+import com.localairquality.app.ui.SystemBars;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -43,6 +41,7 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 
 public final class MainActivity extends Activity implements AirQualityView.Listener {
     private static final String TAG = "LocalAirQuality";
@@ -51,9 +50,11 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
     private static final long RECENT_LOCATION_MILLIS = 15L * 60L * 1000L;
     private static final long LOCATION_TIMEOUT_MILLIS = 12_000L;
     private static final long GEOCODER_TIMEOUT_MILLIS = 5_000L;
-    private static final long REFRESH_TIMEOUT_MILLIS = 45_000L;
+    private static final long REFRESH_TIMEOUT_MILLIS = 60_000L;
 
     private final ExecutorService geocoderExecutor = Executors.newSingleThreadExecutor();
+    // Cache decoding, notification and widget updates stay off the main thread.
+    private final ExecutorService cacheExecutor = Executors.newSingleThreadExecutor();
     private final RefreshFlow flow = new RefreshFlow();
     private final List<CancellationSignal> locationCancellations = new ArrayList<>();
     private AirQualityView airQualityView;
@@ -67,12 +68,7 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
     private Future<?> geocoding;
     private final Runnable automaticUpdate = new Runnable() {
         @Override public void run() {
-            if (!flow.isBusy()) {
-                RefreshCoordinator.refreshIfStale(MainActivity.this);
-                RefreshCoordinator.updateDisplays(MainActivity.this);
-                AirQualityReading cached = ReadingStore.loadReading(MainActivity.this);
-                if (cached != null && !airQualityView.needsRetry()) airQualityView.showReading(cached, false);
-            }
+            if (!flow.isBusy()) showCachedReading(true);
             mainHandler.postDelayed(this, 60_000);
         }
     };
@@ -83,10 +79,9 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
         airQualityView = new AirQualityView(this);
         airQualityView.setListener(this);
         setContentView(airQualityView);
-        configureWindow();
+        SystemBars.edgeToEdge(this, Palette.of(this));
         mainHandler = new Handler(Looper.getMainLooper());
         locationManager = getSystemService(LocationManager.class);
-        RefreshScheduler.schedule(this);
 
         AirQualityReading cached = ReadingStore.loadReading(this);
         if (cached != null) airQualityView.showReading(cached, false);
@@ -98,6 +93,7 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
         flow.cancel();
         cancelPendingFlow();
         geocoderExecutor.shutdownNow();
+        cacheExecutor.shutdown();
         super.onDestroy();
     }
 
@@ -164,20 +160,22 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
         startActivity(new Intent(this, AlertDetailsActivity.class));
     }
 
-    private void configureWindow() {
-        Window window = getWindow();
-        window.setStatusBarColor(Color.rgb(244, 247, 250));
-        window.setNavigationBarColor(Color.rgb(244, 247, 250));
-        if (Build.VERSION.SDK_INT >= 30) {
-            WindowInsetsController controller = window.getInsetsController();
-            if (controller != null) controller.setSystemBarsAppearance(
-                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
-                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
-                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
-        } else {
-            window.getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+    /** Re-reads the cached reading in the background, then shows it unless a refresh took over. */
+    private void showCachedReading(boolean refreshIfStale) {
+        try {
+            cacheExecutor.execute(() -> {
+                if (refreshIfStale) {
+                    RefreshCoordinator.refreshIfStale(this);
+                    RefreshCoordinator.updateDisplays(this);
+                }
+                AirQualityReading cached = ReadingStore.loadReading(this);
+                mainHandler.post(() -> {
+                    if (isDestroyed() || isFinishing() || flow.isBusy()) return;
+                    if (cached != null && !airQualityView.needsRetry()) airQualityView.showReading(cached, false);
+                });
+            });
+        } catch (RejectedExecutionException closed) {
+            // The Activity was destroyed while a recovery callback was pending.
         }
     }
 
@@ -387,11 +385,7 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
 
     private void recoverAndShowHistory() {
         com.localairquality.app.background.HistoryRecoveryCoordinator.recover(this)
-                .whenComplete((complete,error) -> mainHandler.post(() -> {
-                    if (isDestroyed() || isFinishing() || flow.isBusy()) return;
-                    AirQualityReading cached = ReadingStore.loadReading(this);
-                    if (cached != null && !airQualityView.needsRetry()) airQualityView.showReading(cached, false);
-                }));
+                .whenComplete((complete, error) -> showCachedReading(false));
     }
 
     private void cancelPendingFlow() {
@@ -513,5 +507,3 @@ public final class MainActivity extends Activity implements AirQualityView.Liste
         }
     }
 }
-
-

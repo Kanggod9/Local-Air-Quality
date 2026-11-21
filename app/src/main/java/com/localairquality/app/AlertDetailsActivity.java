@@ -18,12 +18,14 @@ import android.widget.Toast;
 import com.localairquality.app.data.AlertGuidance;
 import com.localairquality.app.data.ReadingStore;
 import com.localairquality.app.ui.AlertSymbols;
+import com.localairquality.app.ui.Palette;
+import com.localairquality.app.ui.SystemBars;
 import java.text.DateFormat;
 import java.util.Date;
 
 /** Native scrollable text keeps detailed advice readable with larger accessibility fonts. */
 public final class AlertDetailsActivity extends Activity {
-    private static final int INK=0xFF1F2834, MUTED=0xFF5B6777, GREEN=0xFF177A68;
+    private Palette palette;
     private final Handler handler=new Handler(Looper.getMainLooper());
     private LinearLayout content;
     private ScrollView scroll;
@@ -33,13 +35,15 @@ public final class AlertDetailsActivity extends Activity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        palette=Palette.of(this);
         LinearLayout root=new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL); root.setBackgroundColor(0xFFF4F7FA);
+        root.setOrientation(LinearLayout.VERTICAL); root.setBackgroundColor(palette.background);
         root.setOnApplyWindowInsetsListener((view,insets) -> {
-            view.setPadding(dp(18),insets.getSystemWindowInsetTop(),dp(18),insets.getSystemWindowInsetBottom());
+            int[] bars=SystemBars.insets(insets);
+            view.setPadding(bars[0]+dp(16),bars[1],bars[2]+dp(16),bars[3]);
             return insets;
         });
-        TextView back=text("‹  Back",16,GREEN,true);
+        TextView back=text("‹  Back",16,palette.accent,true);
         back.setGravity(Gravity.CENTER_VERTICAL); back.setMinHeight(dp(48));
         back.setContentDescription("Back to air quality"); back.setOnClickListener(view -> finish());
         root.addView(back,new LinearLayout.LayoutParams(-1,-2));
@@ -48,6 +52,7 @@ public final class AlertDetailsActivity extends Activity {
         content.setPadding(0,dp(8),0,dp(24)); scroll.addView(content);
         root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         setContentView(root);
+        SystemBars.edgeToEdge(this,palette);
     }
     @Override protected void onResume() { super.onResume(); update.run(); }
     @Override protected void onPause() { handler.removeCallbacks(update); super.onPause(); }
@@ -57,7 +62,7 @@ public final class AlertDetailsActivity extends Activity {
         var reading=ReadingStore.loadReading(this);
         var details=AlertGuidance.forReading(reading,System.currentTimeMillis());
         content.removeAllViews();
-        content.addView(text("Alert details",28,INK,true));
+        content.addView(text("Alert details",26,palette.ink,true));
         if (reading!=null && reading.alert.active()) {
             LinearLayout banner=new LinearLayout(this); banner.setGravity(Gravity.CENTER_VERTICAL);
             banner.setPadding(dp(14),dp(14),dp(14),dp(14));
@@ -72,22 +77,22 @@ public final class AlertDetailsActivity extends Activity {
             String context=reading.locationName+"\n"+reading.stationName;
             if(reading.measuredAtMillis>0) context+="\nLatest report: "+DateFormat.getDateTimeInstance(
                     DateFormat.MEDIUM,DateFormat.SHORT).format(new Date(reading.measuredAtMillis));
-            addBlock(text(context,15,MUTED,false));
+            addBlock(text(context,14.5f,palette.muted,false));
         }
         for (var section:details.sections()) {
             LinearLayout card=new LinearLayout(this); card.setOrientation(LinearLayout.VERTICAL);
-            card.setPadding(dp(16),dp(16),dp(16),dp(16)); card.setBackground(shape(0xFFFFFFFF));
-            card.addView(text(section.title(),19,INK,true));
-            TextView body=text(section.text(),16,INK,false); body.setTextIsSelectable(true);
+            card.setPadding(dp(18),dp(16),dp(18),dp(18)); card.setBackground(outlined(palette.surface));
+            card.addView(text(section.title(),18,palette.ink,true));
+            TextView body=text(section.text(),15.5f,palette.ink,false); body.setTextIsSelectable(true);
             body.setPadding(0,dp(10),0,0); body.setLineSpacing(dp(4),1.03f);
             card.addView(body); addBlock(card);
         }
         if(!details.sources().isEmpty()) {
-            addBlock(text("Official guidance and sources",20,INK,true));
+            addBlock(text("Official guidance and sources",19,palette.ink,true));
             content.addView(text("Plain-language adaptations for this app’s custom alert levels."
-                    + " Not a diagnosis or personalised medical advice. Local authority instructions take priority.",14,MUTED,false));
+                    + " Not a diagnosis or personalised medical advice. Local authority instructions take priority.",13.5f,palette.muted,false));
             for (var source:details.sources()) {
-                TextView link=text(source.title()+"  ↗",15,GREEN,false);
+                TextView link=text(source.title()+"  ↗",15,palette.accent,true);
                 link.setPadding(0,dp(8),0,dp(8)); link.setMinHeight(dp(48));
                 link.setGravity(Gravity.CENTER_VERTICAL);
                 link.setContentDescription("Open "+source.title()+" in your browser");
@@ -102,15 +107,19 @@ public final class AlertDetailsActivity extends Activity {
     }
     private void addBlock(android.view.View view) {
         LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);
-        params.topMargin=dp(14); content.addView(view,params);
+        params.topMargin=dp(12); content.addView(view,params);
     }
-    private TextView text(String value,int size,int color,boolean bold) {
+    private TextView text(String value,float size,int color,boolean bold) {
         TextView view=new TextView(this); view.setText(value); view.setTextSize(size); view.setTextColor(color);
-        if(bold) view.setTypeface(Typeface.DEFAULT,Typeface.BOLD);
+        if(bold) view.setTypeface(Typeface.create("sans-serif-medium",Typeface.BOLD));
         return view;
     }
     private GradientDrawable shape(int color) {
-        GradientDrawable drawable=new GradientDrawable(); drawable.setColor(color); drawable.setCornerRadius(dp(18));
+        GradientDrawable drawable=new GradientDrawable(); drawable.setColor(color); drawable.setCornerRadius(dp(20));
+        return drawable;
+    }
+    private GradientDrawable outlined(int color) {
+        GradientDrawable drawable=shape(color); drawable.setStroke(dp(1),palette.outline);
         return drawable;
     }
     private int dp(float value) { return Math.round(value*getResources().getDisplayMetrics().density); }
