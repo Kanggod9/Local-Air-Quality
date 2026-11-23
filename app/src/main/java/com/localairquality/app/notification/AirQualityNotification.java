@@ -9,16 +9,26 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.view.View;
+import android.widget.RemoteViews;
 
 import com.localairquality.app.MainActivity;
 import com.localairquality.app.R;
 import com.localairquality.app.background.RefreshReceiver;
+import com.localairquality.app.data.AirQualityAlert;
 import com.localairquality.app.data.AirQualityReading;
+import com.localairquality.app.data.AqiCalculator;
 import com.localairquality.app.ui.AlertSymbols;
+import com.localairquality.app.ui.Palette;
 
 import java.text.DateFormat;
 import java.util.Date;
 
+/**
+ * Ongoing status in the system's decorated template: a US AQI+ chip in the category colour beside
+ * the level, with the alert banner and station details when expanded. Plain title and text are kept
+ * for the lock screen, accessibility services and devices that do not show custom content.
+ */
 public final class AirQualityNotification {
     private static final String CHANNEL_ID = "local_air_quality_status";
     private static final int NOTIFICATION_ID = 7101;
@@ -58,29 +68,60 @@ public final class AirQualityNotification {
         PendingIntent refresh = PendingIntent.getBroadcast(context, 11, refreshIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
+        AirQualityAlert.Result alert = reading.alert;
         String time = DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(reading.measuredAtMillis));
-        String text = "US " + reading.usAqi + " " + reading.usLevel
-                + "  •  EU " + reading.euBand + " " + reading.euLevel + "  •  " + time;
-        var alert = reading.alert;
-        String expanded = (alert.active() ? alert.message()+"\n\n" : "")
-                + text + "\n" + reading.sourceLabel() + " • " + reading.mainPollutant
-                + (reading.backupNotice().isEmpty()?"":"\n"+reading.backupNotice());
+        String title = reading.usLevel;
+        String european = reading.euBand > 0 ? "European AQI " + reading.euBand + " · " + reading.euLevel
+                : "European AQI —";
+        String summary = alert.active() ? alert.level().title + " · " + alert.timeLabel() : european + " · " + time;
+        String main = reading.mainPollutant + " " + reading.pollutantValue(reading.mainPollutant);
+        StringBuilder detail = new StringBuilder("US AQI+ ").append(reading.usAqi).append(" · Main pollutant ").append(main)
+                .append('\n').append(reading.sourceLabel()).append(" · Reported ").append(time);
+        if (!reading.backupNotice().isEmpty()) detail.append('\n').append(reading.backupNotice());
+
+        int color = AqiCalculator.usColor(reading.usAqi);
+        RemoteViews compact = new RemoteViews(context.getPackageName(), R.layout.notification_compact);
+        fillChip(compact, reading.usAqi, color);
+        compact.setTextViewText(R.id.notification_title, title);
+        compact.setTextViewText(R.id.notification_text, summary);
+
+        RemoteViews expanded = new RemoteViews(context.getPackageName(), R.layout.notification_expanded);
+        fillChip(expanded, reading.usAqi, color);
+        expanded.setTextViewText(R.id.notification_title, title);
+        expanded.setTextViewText(R.id.notification_text, european);
+        expanded.setTextViewText(R.id.notification_detail, detail);
+        expanded.setViewVisibility(R.id.notification_alert_container, alert.active() ? View.VISIBLE : View.GONE);
+        if (alert.active()) {
+            expanded.setInt(R.id.notification_alert_background, "setColorFilter", alert.level().color);
+            expanded.setTextViewCompoundDrawablesRelative(R.id.notification_alert, AlertSymbols.icon(alert.level()), 0, 0, 0);
+            expanded.setTextViewText(R.id.notification_alert, alert.message());
+        }
+
+        String plain = "US " + reading.usAqi + " " + reading.usLevel + "  •  " + european + "  •  " + time;
         Notification.Builder builder = new Notification.Builder(context, CHANNEL_ID)
                 .setSmallIcon(AlertSymbols.icon(alert.level()))
-                .setContentTitle(alert.active() ? alert.level().title+" · "+alert.timeLabel()+" · "+reading.locationName : reading.locationName)
-                .setContentText(text)
-                .setStyle(new Notification.BigTextStyle().bigText(expanded))
+                .setContentTitle(alert.active() ? alert.level().title + " · " + alert.timeLabel() + " · "
+                        + reading.locationName : reading.locationName)
+                .setContentText(plain)
+                .setSubText(reading.locationName)
+                .setStyle(new Notification.DecoratedCustomViewStyle())
+                .setCustomContentView(compact)
+                .setCustomBigContentView(expanded)
                 .setContentIntent(open)
-                .setColor(alert.active() ? alert.level().color : com.localairquality.app.data.AqiCalculator.usColor(reading.usAqi))
+                .setColor(alert.active() ? alert.level().color : color)
                 .setCategory(Notification.CATEGORY_STATUS)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setShowWhen(false)
                 .addAction(new Notification.Action.Builder(
-                        R.drawable.ic_air_quality, context.getString(R.string.update), refresh).build());
-        if (alert.active()) builder.setLargeIcon(AlertSymbols.badge(context, alert.level()));
-        Notification notification = builder.build();
+                        R.drawable.ic_refresh, context.getString(R.string.update), refresh).build());
         NotificationManager manager = context.getSystemService(NotificationManager.class);
-        if (manager != null) manager.notify(NOTIFICATION_ID, notification);
+        if (manager != null) manager.notify(NOTIFICATION_ID, builder.build());
+    }
+
+    private static void fillChip(RemoteViews views, int aqi, int color) {
+        views.setInt(R.id.notification_chip, "setColorFilter", color);
+        views.setTextColor(R.id.notification_aqi, Palette.on(color));
+        views.setTextViewText(R.id.notification_aqi, Integer.toString(aqi));
     }
 }

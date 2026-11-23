@@ -12,6 +12,6 @@ Local Air Quality is an Android app that shows air quality where you are.
 - Simple health tips based on air quality.
 - Light and dark themes that follow the system setting.
 - Automatic updates and pull-to-refresh.
-- Ongoing notification and home-screen widget with update buttons.
+- Ongoing notification and home-screen widget in light and dark, with update buttons.
 - NEA data in Singapore and OpenAQ elsewhere (OpenAQ API key required).
 - OpenAQ backup monitors when the official source is delayed.

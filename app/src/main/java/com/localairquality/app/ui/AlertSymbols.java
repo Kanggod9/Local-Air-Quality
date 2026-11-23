@@ -1,9 +1,7 @@
 package com.localairquality.app.ui;
 
 import android.content.Context;
-import android.graphics.Bitmap;
 import android.graphics.Canvas;
-import android.graphics.Paint;
 import android.graphics.drawable.Drawable;
 
 import com.localairquality.app.R;
@@ -20,16 +18,6 @@ public final class AlertSymbols {
             case BLACK -> R.drawable.ic_alert_4;
             default -> R.drawable.ic_air_quality;
         };
-    }
-
-    public static Bitmap badge(Context context, AirQualityAlert.Level level) {
-        Bitmap bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bitmap);
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        paint.setColor(level.color);
-        canvas.drawRoundRect(0, 0, 64, 64, 12, 12, paint);
-        draw(context, canvas, level, 10, 10, 44);
-        return bitmap;
     }
 
     public static void draw(Context context, Canvas canvas, AirQualityAlert.Level level,

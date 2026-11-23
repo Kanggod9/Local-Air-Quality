@@ -1,4 +1,9 @@
 <resources>
     <color name="window_background">#0D1217</color>
     <color name="accent">#4FD1B8</color>
+    <color name="widget_surface">#171E26</color>
+    <color name="widget_outline">#2B3743</color>
+    <color name="widget_button">#212B36</color>
+    <color name="widget_ink">#EEF2F6</color>
+    <color name="widget_muted">#9BA8B6</color>
 </resources>
